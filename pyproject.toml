@@ -1,0 +1,63 @@
+[project]
+name = "hierarchical-fl"
+version = "0.1.0"
+description = "Hierarchical Federated Learning System (Cloud-Edge-Client)"
+requires-python = ">=3.10,<3.12"
+license = { text = "MIT" }
+dependencies = [
+    "flwr>=1.13.0,<2.0.0",
+    "flwr-datasets[vision]>=0.5.0",
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "pyyaml>=6.0",
+    "tensorboard>=2.14.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+# ===========================================================================
+# uv 設定
+# ===========================================================================
+
+# Jetson 用 PyTorch インデックス
+# 開発PC (x86_64) では PyPI のデフォルトPyTorchを使い、
+# Jetson (aarch64) では jetson-ai-lab の wheel を使う
+[tool.uv.sources]
+torch = [
+    { index = "jetson-pytorch", marker = "platform_machine == 'aarch64'" },
+]
+torchvision = [
+    { index = "jetson-pytorch", marker = "platform_machine == 'aarch64'" },
+]
+
+[[tool.uv.index]]
+name = "jetson-pytorch"
+url = "https://pypi.jetson-ai-lab.io/jp6/cu126"
+explicit = true
+
+# ===========================================================================
+# ツール設定
+# ===========================================================================
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

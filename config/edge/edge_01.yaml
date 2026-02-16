@@ -1,0 +1,28 @@
+# =============================================================================
+# Edge Server 01 固有設定
+# =============================================================================
+
+edge:
+  id: "edge_01"
+  # Edge内部サーバーのアドレス (Leaf Client がここに接続)
+  sub_server_address: "0.0.0.0:9001"
+  # Global Server への接続先
+  global_server_address: "127.0.0.1:8080"
+
+  # Edge層の集約設定
+  sub_rounds: 3                   # Edge内部の集約ラウンド数
+  sub_round_timeout: 120.0        # Leaf応答待ち秒数
+  min_fit_clients: 1
+  min_available_clients: 1
+
+  # 寄与度係数 (contribution_factor)
+  # Global集約時、実データ件数 × この係数 を報告用データ件数とする
+  contribution_factor: 1.0
+
+  # Internal Client (Edge自身のデータで学習するか)
+  internal_client:
+    enabled: true
+
+# training パラメータは defaults.yaml を継承 (必要なら上書き)
+# training:
+#   epochs: 3

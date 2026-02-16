@@ -1,0 +1,39 @@
+# =============================================================================
+# トポロジー定義: どのLeafがどのEdgeに接続するか
+# =============================================================================
+
+# Edge一覧とそれぞれの配下Leaf Client定義
+edges:
+  edge_01:
+    config_file: "config/edge/edge_01.yaml"
+    leaf_clients:
+      - leaf_01
+      - leaf_02
+
+  edge_02:
+    config_file: "config/edge/edge_02.yaml"
+    leaf_clients:
+      - leaf_03
+      - leaf_04
+
+# データ分割設定
+data_partition:
+  # "iid" | "dirichlet"
+  method: "dirichlet"
+  params:
+    alpha: 0.5                  # α → ∞ で IID、α → 0 で極端な Non-IID
+    min_partition_size: 10
+    seed: 42
+
+  # 各パーティションの割り当て
+  # partition_id はデータセット分割時のインデックス
+  # Internal Client (Edge自身) も1パーティションを持つ
+  assignments:
+    edge_01_internal: 0
+    leaf_01: 1
+    leaf_02: 2
+    edge_02_internal: 3
+    leaf_03: 4
+    leaf_04: 5
+
+  total_partitions: 6           # 上記 assignments の総数と一致させる
