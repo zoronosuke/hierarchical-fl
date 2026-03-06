@@ -7,7 +7,7 @@ edge:
   sub_server_address: "0.0.0.0:9002"
   global_server_address: "127.0.0.1:8080"
 
-  sub_rounds: 3
+  sub_rounds: 1
   sub_round_timeout: 120.0
   min_fit_clients: 1
   min_available_clients: 1

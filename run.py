@@ -12,16 +12,38 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 from src.utils.config import load_yaml
 from src.utils.logger import get_logger
 
 logger = get_logger("orchestrator")
+
+
+def _pre_download_dataset(dataset_name: str) -> None:
+    """サブプロセス起動前にデータセットをダウンロードしてキャッシュする。
+
+    複数サブプロセスが同時に HuggingFace datasets キャッシュにアクセスすると
+    Windows 上でファイルロック競合が発生するため、事前にダウンロードしておく。
+    """
+    ds_mapping = {
+        "cifar10": "uoft-cs/cifar10",
+        "mnist": "ylecun/mnist",
+    }
+    hf_name = ds_mapping.get(dataset_name, dataset_name)
+    logger.info(f"Pre-downloading dataset '{hf_name}' to local cache...")
+    try:
+        from datasets import load_dataset
+        ds = load_dataset(hf_name)
+        logger.info(
+            f"Dataset ready: {', '.join(f'{k}: {len(v)}' for k, v in ds.items())} samples"
+        )
+    except Exception as e:
+        logger.warning(f"Pre-download failed ({e}), subprocesses will download individually.")
 
 
 def main() -> None:
@@ -43,6 +65,14 @@ def main() -> None:
 
     dry_run_flag = ["--dry-run"] if args.dry_run else []
     python = sys.executable  # 現在のPythonインタープリタ
+
+    # --- データセット事前ダウンロード (本番モードのみ) ---
+    if not args.dry_run:
+        ds_cfg = global_cfg.get("dataset", {})
+        _pre_download_dataset(ds_cfg.get("name", "cifar10"))
+
+    # サブプロセス用環境変数: キャッシュ済みデータのみ使用 (同時DL競合の回避)
+    sub_env = {**os.environ, "HF_DATASETS_OFFLINE": "1"}
 
     processes: list[subprocess.Popen] = []
 
@@ -66,6 +96,7 @@ def main() -> None:
         p_global = subprocess.Popen(
             [python, "-m", "src.core.global_server",
              "--config", args.global_config] + dry_run_flag,
+            env=sub_env,
         )
         processes.append(p_global)
         time.sleep(3)  # サーバー起動待ち
@@ -84,6 +115,7 @@ def main() -> None:
                  "--global-config", args.global_config,
                  "--topology-config", args.topology_config,
                  "--defaults-config", args.defaults_config] + dry_run_flag,
+                env=sub_env,
             )
             processes.append(p_edge)
             time.sleep(2)  # Edge の sub-server 起動待ち
@@ -101,7 +133,10 @@ def main() -> None:
             leaf_ids = edge_info.get("leaf_clients", [])
             for leaf_id in leaf_ids:
                 partition_id = assignments.get(leaf_id, 0)
-                logger.info(f"Starting Leaf Client: {leaf_id} -> {sub_addr} (partition={partition_id})")
+                logger.info(
+                    f"Starting Leaf Client: {leaf_id} -> {sub_addr} "
+                    f"(partition={partition_id})"
+                )
 
                 p_leaf = subprocess.Popen(
                     [python, "-m", "src.core.run_leaf",
@@ -111,6 +146,7 @@ def main() -> None:
                      "--global-config", args.global_config,
                      "--topology-config", args.topology_config,
                      "--defaults-config", args.defaults_config] + dry_run_flag,
+                    env=sub_env,
                 )
                 processes.append(p_leaf)
                 time.sleep(0.5)

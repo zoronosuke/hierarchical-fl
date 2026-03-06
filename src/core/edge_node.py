@@ -29,6 +29,8 @@ from flwr.common import NDArrays, Scalar, ndarrays_to_parameters
 from flwr.server import ServerConfig
 
 from src.core.client import HFLClient
+from src.core.training import evaluate_model
+from src.data.loader import create_dummy_dataloader, load_test_data
 from src.models.nets import create_model, get_parameters, set_parameters
 from src.strategies.aggregation import create_strategy
 from src.utils.config import resolve_device
@@ -107,6 +109,21 @@ class EdgeNode(fl.client.NumPyClient):
         if self.dry_run:
             self.sub_rounds = self.dry_run_config.get("num_rounds", 1)
 
+        # Edge レベル評価用テストデータローダー
+        if self.dry_run:
+            drc = self.dry_run_config
+            self.testloader = create_dummy_dataloader(
+                batch_size=32,
+                num_samples=drc.get("dummy_data_size", 64),
+                in_channels=in_channels,
+                num_classes=self.num_classes,
+            )
+        else:
+            ds_test_batch = ds_cfg.get("test_batch_size", 128)
+            self.testloader = load_test_data(
+                self.dataset_name, batch_size=ds_test_batch,
+            )
+
         logger.info(
             f"[{self.edge_id}] Initialized "
             f"(sub_addr={self.sub_server_address}, sub_rounds={self.sub_rounds}, "
@@ -135,9 +152,21 @@ class EdgeNode(fl.client.NumPyClient):
     def evaluate(
         self, parameters: NDArrays, config: dict[str, Scalar]
     ) -> tuple[float, int, dict[str, Scalar]]:
-        """Global Server からの評価要求。主要な評価は Global Server 側で実施。"""
+        """Global Server からの評価要求。Edge レベルでのモデル精度を報告。"""
         set_parameters(self.model, parameters)
-        return 0.0, 0, {"edge_id": self.edge_id}
+        loss, accuracy, num_examples = evaluate_model(
+            model=self.model,
+            dataloader=self.testloader,
+            device=self.device,
+        )
+        logger.info(
+            f"[{self.edge_id}] evaluate: "
+            f"loss={loss:.4f}, accuracy={accuracy:.4f} (n={num_examples})"
+        )
+        return float(loss), num_examples, {
+            "accuracy": float(accuracy),
+            "edge_id": self.edge_id,
+        }
 
     # =====================================================================
     # Sub-federation ロジック
@@ -158,9 +187,17 @@ class EdgeNode(fl.client.NumPyClient):
         captured: dict[str, Any] = {"params": initial_parameters}
 
         def capture_evaluate_fn(server_round, parameters_ndarrays, config):
-            """各ラウンド終了時に集約後パラメータを capture する。"""
+            """各ラウンド終了時に集約後パラメータを capture & 評価する。"""
             captured["params"] = parameters_ndarrays
-            return None
+            set_parameters(self.model, parameters_ndarrays)
+            loss, accuracy, n = evaluate_model(
+                self.model, self.testloader, self.device,
+            )
+            logger.info(
+                f"[{self.edge_id}] Sub-round {server_round}: "
+                f"loss={loss:.4f}, accuracy={accuracy:.4f} (n={n})"
+            )
+            return loss, {"accuracy": accuracy}
 
         sub_strategy = create_strategy(
             name="fedavg",
@@ -195,11 +232,22 @@ class EdgeNode(fl.client.NumPyClient):
         total_examples = self._estimate_total_examples()
         reported_examples = max(int(total_examples * self.contribution_factor), 1)
 
+        # 最終集約パラメータの精度を評価
+        set_parameters(self.model, final_params)
+        final_loss, final_accuracy, eval_n = evaluate_model(
+            self.model, self.testloader, self.device,
+        )
+
         logger.info(
             f"[{self.edge_id}] Sub-federation complete "
-            f"(elapsed={elapsed:.1f}s, reported_examples={reported_examples})"
+            f"(elapsed={elapsed:.1f}s, reported_examples={reported_examples}, "
+            f"loss={final_loss:.4f}, accuracy={final_accuracy:.4f})"
         )
-        return final_params, reported_examples, {"edge_id": self.edge_id}
+        return final_params, reported_examples, {
+            "edge_id": self.edge_id,
+            "loss": float(final_loss),
+            "accuracy": float(final_accuracy),
+        }
 
     def _run_internal_client(self) -> None:
         """Internal Client を起動して sub-server にループバック接続する。"""

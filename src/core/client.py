@@ -127,20 +127,31 @@ class HFLClient(fl.client.NumPyClient):
 
         avg_loss = total_loss / max(total_examples, 1)
 
+        # 学習後のローカル精度を計算
+        eval_loss, accuracy, eval_n = evaluate_model(
+            model=self.model,
+            dataloader=self.trainloader,
+            device=self.device,
+        )
+
         # contribution_factor を適用した件数を報告
         reported_examples = int(total_examples * self.contribution_factor)
         reported_examples = max(reported_examples, 1)
 
         logger.info(
             f"[{self.client_id}] fit complete: "
-            f"loss={avg_loss:.4f}, examples={total_examples}, "
-            f"reported={reported_examples}"
+            f"loss={avg_loss:.4f}, accuracy={accuracy:.4f}, "
+            f"examples={total_examples}, reported={reported_examples}"
         )
 
         return (
             get_parameters(self.model),
             reported_examples,
-            {"loss": float(avg_loss)},
+            {
+                "loss": float(avg_loss),
+                "accuracy": float(accuracy),
+                "client_id": self.client_id,
+            },
         )
 
     def evaluate(

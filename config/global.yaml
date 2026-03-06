@@ -4,7 +4,7 @@
 
 server:
   address: "0.0.0.0:8080"
-  num_rounds: 10
+  num_rounds: 5
   round_timeout: 300.0          # 秒。Edgeからの応答待ち上限
   min_fit_clients: 1            # 最低参加Edge数
   min_available_clients: 1      # 起動待ち最低Edge数
