@@ -12,8 +12,12 @@ edge:
   # Edge層の集約設定
   sub_rounds: 1                   # Edge内部の集約ラウンド数
   sub_round_timeout: 120.0        # Leaf応答待ち秒数
-  min_fit_clients: 1
-  min_available_clients: 1
+  min_fit_clients: 3
+  min_available_clients: 3
+  startup_timeout: 60.0
+  parent_model_timeout: 300.0
+  parent_result_timeout: 270.0
+  shutdown_timeout: 30.0
 
   # 寄与度係数 (contribution_factor)
   # Global集約時、実データ件数 × この係数 を報告用データ件数とする

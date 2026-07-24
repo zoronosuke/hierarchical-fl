@@ -1,48 +1,39 @@
-"""
-Edge Node 実装: 階層型連合学習の中核。
-
-Global Server に対しては NumPyClient として振る舞い、
-fit() が呼ばれると内部で flwr.server.start_server を起動して
-配下の Leaf Client (+ Internal Client) から集約を行う。
-
-■ 動作フロー (1 Global Round あたり)
-1. Global Server が Edge の fit() を呼ぶ (パラメータ配布)
-2. Edge 内部で sub-server を起動 (ブロッキング)
-3. Internal Client を別スレッドで sub-server にループバック接続
-4. 外部 Leaf Client も sub-server に接続して学習
-5. sub-server が sub_rounds ラウンド分の FedAvg 集約
-6. evaluate_fn callback で最終パラメータを capture
-7. 集約結果を Global Server への fit() 戻り値として返却
-
-NOTE: flwr.server.start_server は 1.13+ で deprecated だが、
-      入れ子構造では新 SuperLink API が未対応のためレガシー API を使用。
-"""
+"""Global Clientとして動作するEdge Nodeと常駐子連合の管理。"""
 
 from __future__ import annotations
 
-import threading
+import multiprocessing as mp
+import queue
 import time
 from typing import Any
 
 import flwr as fl
-from flwr.common import NDArrays, Scalar, ndarrays_to_parameters
-from flwr.server import ServerConfig
+from flwr.common import NDArrays, Scalar
 
-from src.core.client import HFLClient
+from src.core.sub_federation import (
+    ChildModelResult,
+    ParentModelRequest,
+    WorkerEvent,
+    run_internal_client,
+    run_sub_server,
+)
 from src.core.training import evaluate_model
 from src.data.loader import create_dummy_dataloader, load_test_data
-from src.models.nets import create_model, get_parameters, set_parameters
-from src.strategies.aggregation import create_strategy
+from src.models.nets import (
+    copy_parameters,
+    create_model,
+    get_parameters,
+    set_parameters,
+    validate_parameters,
+)
 from src.utils.config import resolve_device
 from src.utils.logger import get_logger
 
 logger = get_logger("edge")
 
 
-class EdgeNode(fl.client.NumPyClient):
-    """
-    Edge Node: Global Server に対するクライアント兼、Leaf Client に対するサーバー。
-    """
+class EdgeRuntime:
+    """子サーバーとInternal Clientのspawnプロセスを所有する。"""
 
     def __init__(
         self,
@@ -51,89 +42,213 @@ class EdgeNode(fl.client.NumPyClient):
         topology_config: dict[str, Any],
         defaults_config: dict[str, Any],
     ) -> None:
-        ec = edge_config["edge"]
-        self.edge_id: str = ec["id"]
-        self.sub_server_address: str = ec["sub_server_address"]
-        self.sub_rounds: int = ec.get("sub_rounds", 3)
-        self.sub_round_timeout: float = ec.get("sub_round_timeout", 120.0)
-        self.min_fit_clients: int = ec.get("min_fit_clients", 1)
-        self.min_available_clients: int = ec.get("min_available_clients", 1)
-        self.contribution_factor: float = ec.get("contribution_factor", 1.0)
-        self.internal_client_enabled: bool = ec.get("internal_client", {}).get("enabled", True)
+        self.edge_config = edge_config
+        self.global_config = global_config
+        self.topology_config = topology_config
+        self.defaults_config = defaults_config
+        self.edge_id = edge_config["edge"]["id"]
+        self.context = mp.get_context("spawn")
+        self.parent_queue = self.context.Queue(maxsize=1)
+        self.result_queue = self.context.Queue(maxsize=1)
+        self.event_queue = self.context.Queue()
+        self.sub_server_process: mp.Process | None = None
+        self.internal_client_process: mp.Process | None = None
+        self.last_event: WorkerEvent | None = None
 
-        # モード
-        mode = global_config.get("mode", "production")
-        self.dry_run = mode == "dry_run"
+    def start(self) -> None:
+        ec = self.edge_config["edge"]
+        self.sub_server_process = self.context.Process(
+            name=f"{self.edge_id}-sub-server",
+            target=run_sub_server,
+            args=(
+                self.edge_config,
+                self.global_config,
+                self.defaults_config,
+                self.parent_queue,
+                self.result_queue,
+                self.event_queue,
+            ),
+        )
+        self.sub_server_process.start()
 
-        # デバイス
-        device_cfg = edge_config.get("device", defaults_config.get("device", "auto"))
-        self.device = resolve_device(device_cfg)
+        if ec.get("internal_client", {}).get("enabled", True):
+            self.internal_client_process = self.context.Process(
+                name=f"{self.edge_id}-internal-client",
+                target=run_internal_client,
+                args=(
+                    self.edge_config,
+                    self.global_config,
+                    self.topology_config,
+                    self.defaults_config,
+                    self.event_queue,
+                ),
+            )
+            self.internal_client_process.start()
 
-        # モデル設定
-        model_cfg = global_config.get("model", {})
-        self.model_name = model_cfg.get("name", "simplecnn")
-        self.num_classes = model_cfg.get("num_classes", 10)
-        ds_cfg = global_config.get("dataset", {})
-        self.dataset_name = ds_cfg.get("name", "cifar10")
-        in_channels = 1 if self.dataset_name == "mnist" else 3
+        self._wait_for_server_start(float(ec.get("startup_timeout", 60.0)))
 
-        self.model = create_model(
-            name=self.model_name, num_classes=self.num_classes,
-            in_channels=in_channels, dry_run=self.dry_run,
+    def _wait_for_server_start(self, timeout: float) -> None:
+        started = time.monotonic()
+        while time.monotonic() - started < timeout:
+            self.raise_if_failed()
+            try:
+                event = self.event_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            self.last_event = event
+            if event.kind == "error":
+                raise RuntimeError(f"[{self.edge_id}] {event.worker} failed:\n{event.message}")
+            if event.worker == "sub_server" and event.kind == "started":
+                logger.info(f"[{self.edge_id}] Child server process is ready.")
+                return
+        raise TimeoutError(
+            f"[{self.edge_id}] Startup timeout: edge_id={self.edge_id}, "
+            "parent_round=0, child_round=0, connected_clients=0, "
+            f"expected_clients={self.edge_config['edge']['min_available_clients']}, "
+            f"waited={timeout:.1f}s"
         )
 
-        # 学習設定 (Edge固有 > defaults)
-        self.training_config = {
-            **defaults_config.get("training", {}),
-            **edge_config.get("training", {}),
-        }
+    def drain_events(self) -> None:
+        while True:
+            try:
+                event = self.event_queue.get_nowait()
+            except queue.Empty:
+                return
+            self.last_event = event
+            if event.kind == "error":
+                raise RuntimeError(f"[{self.edge_id}] {event.worker} failed:\n{event.message}")
 
-        # データ分割設定
-        dp = topology_config.get("data_partition", {})
-        self.partition_method = dp.get("method", "dirichlet")
-        self.partition_params = dp.get("params", {})
-        self.total_partitions = dp.get("total_partitions", 6)
-        assignments = dp.get("assignments", {})
+    def raise_if_failed(self) -> None:
+        for process in (self.sub_server_process, self.internal_client_process):
+            if process is not None and process.exitcode not in (None, 0):
+                raise RuntimeError(
+                    f"[{self.edge_id}] Worker {process.name} exited with "
+                    f"code {process.exitcode}"
+                )
+        self.drain_events()
 
-        self.internal_partition_id = assignments.get(f"{self.edge_id}_internal", 0)
+    def shutdown(self, successful: bool) -> None:
+        timeout = float(self.edge_config["edge"].get("shutdown_timeout", 30.0))
+        processes = [
+            process
+            for process in (self.internal_client_process, self.sub_server_process)
+            if process is not None
+        ]
+        if successful:
+            for process in processes:
+                process.join(timeout=timeout)
+            alive = [process for process in processes if process.is_alive()]
+            failed = [
+                process
+                for process in processes
+                if process.exitcode not in (None, 0)
+            ]
+            if alive or failed:
+                for process in alive:
+                    process.terminate()
+                for process in alive:
+                    process.join(timeout=5)
+                details = ", ".join(
+                    f"{process.name}:exit={process.exitcode}" for process in alive + failed
+                )
+                raise RuntimeError(f"[{self.edge_id}] Worker shutdown failed: {details}")
+        else:
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+            for process in processes:
+                process.join(timeout=5)
 
-        edges_cfg = topology_config.get("edges", {})
-        edge_topo = edges_cfg.get(self.edge_id, {})
-        self.leaf_ids: list[str] = edge_topo.get("leaf_clients", [])
-        self.leaf_partition_ids: dict[str, int] = {
-            lid: assignments.get(lid, 0) for lid in self.leaf_ids
-        }
+        self.parent_queue.close()
+        self.result_queue.close()
+        self.event_queue.close()
 
-        # dry_run 設定
-        self.dry_run_config = global_config.get("dry_run", {})
+
+class EdgeNode(fl.client.NumPyClient):
+    """Global Serverのクライアントとして子連合を同期実行する。"""
+
+    def __init__(
+        self,
+        edge_config: dict[str, Any],
+        global_config: dict[str, Any],
+        topology_config: dict[str, Any],
+        defaults_config: dict[str, Any],
+        runtime: EdgeRuntime,
+    ) -> None:
+        ec = edge_config["edge"]
+        self.runtime = runtime
+        self.edge_id = ec["id"]
+        self.contribution_factor = float(ec.get("contribution_factor", 1.0))
+        self.result_timeout = float(ec.get("parent_result_timeout", 180.0))
+        self.expected_parent_round = 1
+        self.sub_rounds = self._sub_rounds(ec, global_config)
+        required_child_time = self.sub_rounds * float(
+            ec.get("sub_round_timeout", 120.0)
+        )
+        global_timeout = float(
+            global_config.get("server", {}).get("round_timeout", 300.0)
+        )
+        if self.result_timeout <= required_child_time:
+            raise ValueError(
+                f"[{self.edge_id}] parent_result_timeout={self.result_timeout} must "
+                f"exceed sub_rounds * sub_round_timeout={required_child_time}"
+            )
+        if global_timeout <= self.result_timeout:
+            raise ValueError(
+                f"[{self.edge_id}] Global round_timeout={global_timeout} must exceed "
+                f"parent_result_timeout={self.result_timeout}"
+            )
+        self.expected_clients = len(
+            topology_config.get("edges", {}).get(self.edge_id, {}).get("leaf_clients", [])
+        ) + int(ec.get("internal_client", {}).get("enabled", True))
+        if self.expected_clients != int(ec["min_available_clients"]):
+            raise ValueError(
+                f"[{self.edge_id}] Configured participants={self.expected_clients}, "
+                f"min_available_clients={ec['min_available_clients']}"
+            )
+
+        self.dry_run = global_config.get("mode") == "dry_run"
+        self.device = resolve_device(
+            edge_config.get("device", defaults_config.get("device", "auto"))
+        )
+        model_cfg = global_config.get("model", {})
+        dataset_cfg = global_config.get("dataset", {})
+        self.dataset_name = dataset_cfg.get("name", "cifar10")
+        in_channels = 1 if self.dataset_name == "mnist" else 3
+        self.model = create_model(
+            model_cfg.get("name", "simplecnn"),
+            num_classes=model_cfg.get("num_classes", 10),
+            in_channels=in_channels,
+            dry_run=self.dry_run,
+        )
         if self.dry_run:
-            self.sub_rounds = self.dry_run_config.get("num_rounds", 1)
-
-        # Edge レベル評価用テストデータローダー
-        if self.dry_run:
-            drc = self.dry_run_config
+            dry_cfg = global_config.get("dry_run", {})
             self.testloader = create_dummy_dataloader(
                 batch_size=32,
-                num_samples=drc.get("dummy_data_size", 64),
+                num_samples=dry_cfg.get("dummy_data_size", 64),
                 in_channels=in_channels,
-                num_classes=self.num_classes,
+                num_classes=model_cfg.get("num_classes", 10),
             )
         else:
-            ds_test_batch = ds_cfg.get("test_batch_size", 128)
             self.testloader = load_test_data(
-                self.dataset_name, batch_size=ds_test_batch,
+                self.dataset_name,
+                batch_size=dataset_cfg.get("test_batch_size", 128),
             )
 
         logger.info(
-            f"[{self.edge_id}] Initialized "
-            f"(sub_addr={self.sub_server_address}, sub_rounds={self.sub_rounds}, "
-            f"leaves={self.leaf_ids}, internal={self.internal_client_enabled}, "
-            f"dry_run={self.dry_run})"
+            f"[{self.edge_id}] Initialized persistent Edge client "
+            f"(sub_rounds={self.sub_rounds}, expected_clients={self.expected_clients})"
         )
 
-    # =====================================================================
-    # Flower NumPyClient インターフェース
-    # =====================================================================
+    @staticmethod
+    def _sub_rounds(ec: dict[str, Any], global_config: dict[str, Any]) -> int:
+        if global_config.get("mode") == "dry_run":
+            return int(
+                global_config.get("dry_run", {}).get(
+                    "sub_rounds", ec.get("sub_rounds", 1)
+                )
+            )
+        return int(ec.get("sub_rounds", 1))
 
     def get_parameters(self, config: dict[str, Scalar]) -> NDArrays:
         return get_parameters(self.model)
@@ -141,148 +256,90 @@ class EdgeNode(fl.client.NumPyClient):
     def fit(
         self, parameters: NDArrays, config: dict[str, Scalar]
     ) -> tuple[NDArrays, int, dict[str, Scalar]]:
-        """Global Server から呼ばれる。内部 sub-federation を実行して集約結果を返す。"""
-        set_parameters(self.model, parameters)
-        logger.info(f"[{self.edge_id}] fit() called. Starting sub-federation...")
+        raw_round = config.get("parent_round")
+        if not isinstance(raw_round, int):
+            raise ValueError(
+                f"[{self.edge_id}] Missing integer parent_round in fit config"
+            )
+        parent_round = raw_round
+        if parent_round != self.expected_parent_round:
+            raise RuntimeError(
+                f"[{self.edge_id}] Non-sequential Global round: "
+                f"expected={self.expected_parent_round}, got={parent_round}"
+            )
+        validate_parameters(self.model, parameters)
+        request = ParentModelRequest(parent_round, copy_parameters(parameters))
+        self.runtime.parent_queue.put(request, timeout=5)
+        logger.info(
+            f"[{self.edge_id}] Parent model submitted: parent_round={parent_round}"
+        )
 
-        result_params, num_examples, metrics = self._run_sub_federation(parameters)
-        set_parameters(self.model, result_params)
-        return result_params, num_examples, metrics
+        started = time.monotonic()
+        while True:
+            self.runtime.raise_if_failed()
+            elapsed = time.monotonic() - started
+            remaining = self.result_timeout - elapsed
+            if remaining <= 0:
+                last = self.runtime.last_event
+                child_round = last.child_round if last is not None else 0
+                connected = last.connected_clients if last is not None else 0
+                raise TimeoutError(
+                    f"[{self.edge_id}] Child result timeout: edge_id={self.edge_id}, "
+                    f"parent_round={parent_round}, child_round={child_round}, "
+                    f"connected_clients={connected}, "
+                    f"expected_clients={self.expected_clients}, "
+                    f"waited={elapsed:.1f}s"
+                )
+            try:
+                result = self.runtime.result_queue.get(timeout=min(0.5, remaining))
+            except queue.Empty:
+                continue
+            break
+
+        if not isinstance(result, ChildModelResult):
+            raise TypeError(f"Unexpected result queue message: {type(result)!r}")
+        expected_child_round = parent_round * self.sub_rounds
+        if (
+            result.parent_round != parent_round
+            or result.child_round != expected_child_round
+        ):
+            raise RuntimeError(
+                f"[{self.edge_id}] Result round mismatch: expected parent/child "
+                f"{parent_round}/{expected_child_round}, got "
+                f"{result.parent_round}/{result.child_round}"
+            )
+        validate_parameters(self.model, result.parameters)
+        final_parameters = copy_parameters(result.parameters)
+        set_parameters(self.model, final_parameters)
+        self.expected_parent_round += 1
+        reported_examples = max(
+            int(result.num_examples * self.contribution_factor), 1
+        )
+        loss, accuracy, sample_count = evaluate_model(
+            self.model, self.testloader, self.device
+        )
+        logger.info(
+            f"[{self.edge_id}] Returning child aggregate: parent_round={parent_round}, "
+            f"child_round={result.child_round}, clients={self.expected_clients}, "
+            f"reported_examples={reported_examples}"
+        )
+        return final_parameters, reported_examples, {
+            "edge_id": self.edge_id,
+            "parent_round": parent_round,
+            "child_round": result.child_round,
+            "loss": float(loss),
+            "accuracy": float(accuracy),
+            "eval_examples": sample_count,
+        }
 
     def evaluate(
         self, parameters: NDArrays, config: dict[str, Scalar]
     ) -> tuple[float, int, dict[str, Scalar]]:
-        """Global Server からの評価要求。Edge レベルでのモデル精度を報告。"""
         set_parameters(self.model, parameters)
         loss, accuracy, num_examples = evaluate_model(
-            model=self.model,
-            dataloader=self.testloader,
-            device=self.device,
-        )
-        logger.info(
-            f"[{self.edge_id}] evaluate: "
-            f"loss={loss:.4f}, accuracy={accuracy:.4f} (n={num_examples})"
+            self.model, self.testloader, self.device
         )
         return float(loss), num_examples, {
             "accuracy": float(accuracy),
             "edge_id": self.edge_id,
         }
-
-    # =====================================================================
-    # Sub-federation ロジック
-    # =====================================================================
-
-    def _run_sub_federation(
-        self, initial_parameters: NDArrays
-    ) -> tuple[NDArrays, int, dict[str, Scalar]]:
-        """サブ連合学習を実行し、集約結果を返す。"""
-        initial_params_proto = ndarrays_to_parameters(initial_parameters)
-
-        expected_clients = len(self.leaf_ids) + (1 if self.internal_client_enabled else 0)
-        if expected_clients == 0:
-            logger.warning(f"[{self.edge_id}] No clients configured.")
-            return initial_parameters, 0, {}
-
-        # パラメータ capture 用コンテナ
-        captured: dict[str, Any] = {"params": initial_parameters}
-
-        def capture_evaluate_fn(server_round, parameters_ndarrays, config):
-            """各ラウンド終了時に集約後パラメータを capture & 評価する。"""
-            captured["params"] = parameters_ndarrays
-            set_parameters(self.model, parameters_ndarrays)
-            loss, accuracy, n = evaluate_model(
-                self.model, self.testloader, self.device,
-            )
-            logger.info(
-                f"[{self.edge_id}] Sub-round {server_round}: "
-                f"loss={loss:.4f}, accuracy={accuracy:.4f} (n={n})"
-            )
-            return loss, {"accuracy": accuracy}
-
-        sub_strategy = create_strategy(
-            name="fedavg",
-            initial_parameters=initial_params_proto,
-            evaluate_fn=capture_evaluate_fn,
-            fraction_fit=1.0,
-            min_fit_clients=min(expected_clients, self.min_fit_clients),
-            min_available_clients=min(expected_clients, self.min_available_clients),
-        )
-
-        # Internal Client をバックグラウンドスレッドで起動
-        if self.internal_client_enabled:
-            threading.Thread(target=self._run_internal_client, daemon=True).start()
-
-        # Sub-server 起動 (ブロッキング: 全ラウンド完了まで)
-        logger.info(
-            f"[{self.edge_id}] Sub-server starting on {self.sub_server_address} "
-            f"(expecting {expected_clients} clients, {self.sub_rounds} rounds)"
-        )
-        result = fl.server.start_server(
-            server_address=self.sub_server_address,
-            config=ServerConfig(
-                num_rounds=self.sub_rounds,
-                round_timeout=self.sub_round_timeout,
-            ),
-            strategy=sub_strategy,
-        )
-
-        elapsed = result[1] if isinstance(result, tuple) else 0.0
-        final_params = captured["params"]
-
-        total_examples = self._estimate_total_examples()
-        reported_examples = max(int(total_examples * self.contribution_factor), 1)
-
-        # 最終集約パラメータの精度を評価
-        set_parameters(self.model, final_params)
-        final_loss, final_accuracy, eval_n = evaluate_model(
-            self.model, self.testloader, self.device,
-        )
-
-        logger.info(
-            f"[{self.edge_id}] Sub-federation complete "
-            f"(elapsed={elapsed:.1f}s, reported_examples={reported_examples}, "
-            f"loss={final_loss:.4f}, accuracy={final_accuracy:.4f})"
-        )
-        return final_params, reported_examples, {
-            "edge_id": self.edge_id,
-            "loss": float(final_loss),
-            "accuracy": float(final_accuracy),
-        }
-
-    def _run_internal_client(self) -> None:
-        """Internal Client を起動して sub-server にループバック接続する。"""
-        logger.info(f"[{self.edge_id}] Starting internal client...")
-        time.sleep(2.0)  # sub-server の起動を待機
-
-        connect_address = self.sub_server_address.replace("0.0.0.0", "127.0.0.1")
-
-        client = HFLClient(
-            client_id=f"{self.edge_id}_internal",
-            model_name=self.model_name,
-            num_classes=self.num_classes,
-            dataset_name=self.dataset_name,
-            partition_id=self.internal_partition_id,
-            total_partitions=self.total_partitions,
-            partition_method=self.partition_method,
-            partition_params=self.partition_params,
-            training_config=self.training_config,
-            device=self.device,
-            dry_run=self.dry_run,
-            dry_run_config=self.dry_run_config,
-            contribution_factor=1.0,
-        )
-
-        try:
-            fl.client.start_client(
-                server_address=connect_address,
-                client=client.to_client(),
-                insecure=True,
-            )
-            logger.info(f"[{self.edge_id}] Internal client finished.")
-        except Exception as e:
-            logger.error(f"[{self.edge_id}] Internal client error: {e}")
-
-    def _estimate_total_examples(self) -> int:
-        """Edge配下の推定総データ件数。"""
-        num_clients = len(self.leaf_ids) + (1 if self.internal_client_enabled else 0)
-        return max(num_clients * 1000, 1)

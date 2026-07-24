@@ -140,6 +140,8 @@ class HFLClient(fl.client.NumPyClient):
 
         logger.info(
             f"[{self.client_id}] fit complete: "
+            f"parent_round={config.get('parent_round', 0)}, "
+            f"child_round={config.get('child_round', 0)}, "
             f"loss={avg_loss:.4f}, accuracy={accuracy:.4f}, "
             f"examples={total_examples}, reported={reported_examples}"
         )

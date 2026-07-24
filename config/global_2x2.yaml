@@ -1,0 +1,31 @@
+# 2 Global Round × 2 sub-round 専用統合試験設定
+server:
+  address: "0.0.0.0:8080"
+  num_rounds: 2
+  round_timeout: 300.0
+  min_fit_clients: 2
+  min_available_clients: 2
+  fraction_fit: 1.0
+
+strategy:
+  name: "fedavg"
+  params: {}
+
+model:
+  name: "simplecnn"
+  num_classes: 10
+
+dataset:
+  name: "cifar10"
+  test_batch_size: 128
+
+evaluation:
+  enabled: true
+  log_dir: "./runs"
+
+mode: "dry_run"
+dry_run:
+  global_rounds: 2
+  sub_rounds: 2
+  dummy_data_size: 64
+  dummy_steps: 2

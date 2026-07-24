@@ -96,7 +96,10 @@ class WeightedFedAvg(fl.server.strategy.FedAvg):
     ) -> tuple[Optional[Parameters], dict[str, Scalar]]:
         """集約ログを追加した上で親クラスのFedAvg集約に委譲。"""
         if not results:
-            logger.warning(f"Round {server_round}: No results received.")
+            message = f"Round {server_round}: No results received."
+            if self.min_fit_clients > 0:
+                raise RuntimeError(message)
+            logger.warning(message)
             return None, {}
 
         total_examples = sum(r.num_examples for _, r in results)
@@ -104,4 +107,9 @@ class WeightedFedAvg(fl.server.strategy.FedAvg):
             f"Round {server_round}: Aggregating {len(results)} results "
             f"({total_examples} total examples, {len(failures)} failures)"
         )
+        if self.min_fit_clients > 0 and len(results) < self.min_fit_clients:
+            raise RuntimeError(
+                f"Round {server_round}: expected at least {self.min_fit_clients} "
+                f"results, got {len(results)}"
+            )
         return super().aggregate_fit(server_round, results, failures)

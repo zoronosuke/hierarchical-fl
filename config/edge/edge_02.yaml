@@ -9,8 +9,12 @@ edge:
 
   sub_rounds: 1
   sub_round_timeout: 120.0
-  min_fit_clients: 1
-  min_available_clients: 1
+  min_fit_clients: 3
+  min_available_clients: 3
+  startup_timeout: 60.0
+  parent_model_timeout: 300.0
+  parent_result_timeout: 270.0
+  shutdown_timeout: 30.0
 
   contribution_factor: 1.0
 

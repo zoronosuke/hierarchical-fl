@@ -1,7 +1,6 @@
 """基本的なユニットテスト。"""
 
 import tempfile
-from pathlib import Path
 
 import yaml
 
