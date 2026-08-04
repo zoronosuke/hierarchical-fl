@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -49,6 +50,36 @@ def _stop_all(processes: list[ManagedProcess], grace: float = 10.0) -> None:
                 managed.process.wait(timeout=5)
 
 
+def _wait_for_listener(
+    managed: ManagedProcess,
+    address: str,
+    timeout: float,
+) -> None:
+    """子プロセスが終了していないことを確認しながらTCP待受を待つ。"""
+    host, port_text = address.rsplit(":", 1)
+    if host in ("0.0.0.0", "::"):
+        host = "127.0.0.1"
+    port = int(port_text)
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        returncode = managed.process.poll()
+        if returncode is not None:
+            raise RuntimeError(
+                f"{managed.name} exited before listening on {address}: {returncode}"
+            )
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                logger.info(f"{managed.name} is listening on {address}.")
+                return
+        except OSError:
+            time.sleep(0.2)
+
+    raise TimeoutError(
+        f"{managed.name} did not listen on {address} within {timeout:.1f}s"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="HFL Orchestrator")
     parser.add_argument("--dry-run", action="store_true")
@@ -60,6 +91,12 @@ def main() -> int:
         type=float,
         default=900.0,
         help="全プロセスが終了するまでの上限秒数",
+    )
+    parser.add_argument(
+        "--startup-timeout",
+        type=float,
+        default=120.0,
+        help="Global/EdgeのTCP待受開始を待つ上限秒数",
     )
     args = parser.parse_args()
 
@@ -82,13 +119,15 @@ def main() -> int:
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    def launch(name: str, command: list[str]) -> None:
+    def launch(name: str, command: list[str]) -> ManagedProcess:
         logger.info(f"Starting {name}...")
         process = subprocess.Popen(command, env=sub_env)
-        processes.append(ManagedProcess(name, process))
+        managed = ManagedProcess(name, process)
+        processes.append(managed)
+        return managed
 
     try:
-        launch(
+        global_process = launch(
             "global",
             [
                 python,
@@ -99,14 +138,18 @@ def main() -> int:
                 *dry_run_flag,
             ],
         )
-        time.sleep(2)
+        global_address = global_cfg.get("server", {}).get(
+            "address", "0.0.0.0:8080"
+        )
+        _wait_for_listener(global_process, global_address, args.startup_timeout)
 
         edges = topology_cfg.get("edges", {})
+        edge_processes: dict[str, tuple[ManagedProcess, str]] = {}
         for edge_id, edge_info in edges.items():
             edge_config_file = edge_info.get(
                 "config_file", f"config/edge/{edge_id}.yaml"
             )
-            launch(
+            edge_process = launch(
                 edge_id,
                 [
                     python,
@@ -123,8 +166,15 @@ def main() -> int:
                     *dry_run_flag,
                 ],
             )
+            edge_cfg = load_yaml(edge_config_file)
+            edge_processes[edge_id] = (
+                edge_process,
+                edge_cfg["edge"]["sub_server_address"],
+            )
 
-        time.sleep(2)
+        for edge_process, address in edge_processes.values():
+            _wait_for_listener(edge_process, address, args.startup_timeout)
+
         assignments = topology_cfg.get("data_partition", {}).get("assignments", {})
         for edge_id, edge_info in edges.items():
             edge_config_file = edge_info.get(

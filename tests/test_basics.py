@@ -1,6 +1,7 @@
 """基本的なユニットテスト。"""
 
 import tempfile
+from pathlib import Path
 
 import yaml
 
@@ -30,6 +31,35 @@ def test_config_load_yaml():
 
     assert result["key"] == "value"
     assert result["nested"]["a"] == 1
+
+
+def test_jetson_7node_config():
+    """7台実機設定が1PC用設定と分離され、Partitionが重複しない。"""
+    from src.utils.config import load_yaml
+
+    repository = Path(__file__).resolve().parents[1]
+    common_edge = load_yaml(repository / "config/edge/edge_01.yaml")
+    global_config = load_yaml(repository / "config/jetson-7node/global.yaml")
+    edge_01 = load_yaml(repository / "config/jetson-7node/edge_01.yaml")
+    edge_02 = load_yaml(repository / "config/jetson-7node/edge_02.yaml")
+    topology = load_yaml(repository / "config/topology.yaml")
+
+    assert common_edge["edge"]["global_server_address"] == "127.0.0.1:8080"
+    assert global_config["server"]["address"] == "0.0.0.0:8080"
+    assert global_config["server"]["round_timeout"] == 4200.0
+    assert edge_01["edge"]["global_server_address"] == "192.168.10.201:8080"
+    assert edge_02["edge"]["global_server_address"] == "192.168.10.201:8080"
+
+    assignments = topology["data_partition"]["assignments"]
+    assert assignments == {
+        "edge_01_internal": 0,
+        "leaf_01": 1,
+        "leaf_02": 2,
+        "edge_02_internal": 3,
+        "leaf_03": 4,
+        "leaf_04": 5,
+    }
+    assert sorted(assignments.values()) == list(range(6))
 
 
 def test_resolve_device():

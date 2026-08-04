@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [master, develop]
   pull_request:
-    branches: [main]
+    branches: [master]
 
 jobs:
   lint-and-test:
@@ -24,15 +24,21 @@ jobs:
         run: uv sync --all-extras
 
       - name: Lint
-        run: uv run ruff check src/
+        run: uv run ruff check src/ run.py tests/
 
       - name: Syntax check (all Python files)
-        run: uv run python -c "
+        run: |
+          uv run python -c "
           import ast, pathlib, sys
           ok = True
-          for f in pathlib.Path('src').rglob('*.py'):
+          files = [
+              pathlib.Path('run.py'),
+              *pathlib.Path('src').rglob('*.py'),
+              *pathlib.Path('tests').rglob('*.py'),
+          ]
+          for f in files:
               try:
-                  ast.parse(f.read_text())
+                  ast.parse(f.read_text(encoding='utf-8'))
               except SyntaxError as e:
                   print(f'FAIL: {f} -> {e}')
                   ok = False

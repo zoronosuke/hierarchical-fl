@@ -37,6 +37,9 @@ bash scripts/setup_jetson.sh
 uv run python run.py --dry-run
 ```
 
+7台実機での個別起動、CIFAR-10実験、Partition割当は
+[`docs/jetson-7node-experiment.md`](docs/jetson-7node-experiment.md) を参照してください。
+
 ## 使い方
 
 ```bash

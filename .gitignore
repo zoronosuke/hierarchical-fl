@@ -8,3 +8,6 @@ build/
 runs/
 *.log
 .ruff_cache/
+.pytest_cache/
+artifacts/
+config/jetson-7node/ssh-inventory.local.psd1
