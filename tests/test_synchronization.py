@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 
+import grpc
 import numpy as np
 import pytest
 from flwr.common import Code, FitRes, Status, ndarrays_to_parameters
@@ -13,6 +14,7 @@ from flwr.common import Code, FitRes, Status, ndarrays_to_parameters
 from src.core.sub_federation import (
     ParentModelRequest,
     SynchronousSubFedAvg,
+    _start_client_with_retry,
     parent_round_for_child,
 )
 from src.models.nets import (
@@ -29,6 +31,32 @@ from src.models.nets import (
 )
 def test_parent_child_round_mapping(child_round, sub_rounds, parent_round):
     assert parent_round_for_child(child_round, sub_rounds) == parent_round
+
+
+def test_internal_client_retries_initial_unavailable(monkeypatch):
+    class InitialUnavailable(grpc.RpcError):
+        def code(self):
+            return grpc.StatusCode.UNAVAILABLE
+
+    attempts = []
+
+    def fake_start_client(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise InitialUnavailable()
+
+    monkeypatch.setattr("src.core.sub_federation.fl.client.start_client", fake_start_client)
+
+    client = object()
+    _start_client_with_retry(
+        server_address="127.0.0.1:9001",
+        client=client,
+        startup_timeout=1.0,
+        retry_interval=0.0,
+    )
+
+    assert len(attempts) == 2
+    assert attempts[1]["client"] is client
 
 
 def test_parameter_copy_is_independent():

@@ -10,6 +10,7 @@ from multiprocessing.queues import Queue
 from typing import Any
 
 import flwr as fl
+import grpc
 from flwr.common import (
     FitIns,
     FitRes,
@@ -32,6 +33,41 @@ from src.utils.config import resolve_device
 from src.utils.logger import get_logger
 
 logger = get_logger("sub_federation")
+
+
+def _start_client_with_retry(
+    *,
+    server_address: str,
+    client: Any,
+    startup_timeout: float,
+    retry_interval: float = 1.0,
+) -> None:
+    """起動直後のUNAVAILABLEを許容してFlower Clientを接続する。"""
+    deadline = time.monotonic() + startup_timeout
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            fl.client.start_client(
+                server_address=server_address,
+                client=client,
+                insecure=True,
+                max_retries=None,
+            )
+            return
+        except grpc.RpcError as exc:
+            remaining = deadline - time.monotonic()
+            if exc.code() != grpc.StatusCode.UNAVAILABLE or remaining <= 0:
+                raise
+            logger.warning(
+                "Flower server at %s is not ready; retrying in %.1fs "
+                "(attempt=%d, remaining=%.1fs)",
+                server_address,
+                min(retry_interval, remaining),
+                attempt,
+                remaining,
+            )
+            time.sleep(min(retry_interval, remaining))
 
 
 @dataclass
@@ -367,11 +403,10 @@ def run_internal_client(
                 message=f"Connecting to {address}",
             )
         )
-        fl.client.start_client(
+        _start_client_with_retry(
             server_address=address,
             client=client.to_client(),
-            insecure=True,
-            max_retries=None,
+            startup_timeout=float(ec.get("startup_timeout", 60.0)),
         )
         event_queue.put(
             WorkerEvent(
