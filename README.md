@@ -37,12 +37,18 @@ bash scripts/setup_jetson.sh
 uv run python run.py --dry-run
 ```
 
+7台実機での個別起動、CIFAR-10実験、Partition割当は
+[`docs/jetson-7node-experiment.md`](docs/jetson-7node-experiment.md) を参照してください。
+
 ## 使い方
 
 ```bash
 # 1PC上で全プロセス起動 (PoC)
 uv run python run.py --dry-run     # 疎通確認
 uv run python run.py               # 本番学習
+
+# 追加統合試験 (Global 2 round × Edge sub-round 2)
+uv run python run.py --dry-run --global-config config/global_2x2.yaml
 
 # 個別起動 (マルチマシン)
 uv run python -m src.core.global_server
@@ -80,6 +86,11 @@ uv run pytest tests/ -v        # テスト
 
 ## 技術的な注意
 
+- `uv.lock` で実際に検証した依存関係を固定する (`flwr==1.30.0`)
 - `flwr.server.start_server` は deprecated だが入れ子構造では必須
+- Edge の子サーバーと Internal Client は `spawn` 子プロセスとして1回だけ起動し、
+  全 Global Round が終わるまで接続を維持する
+- 標準 dry-run は Global 2 round × sub-round 1、各Edge 3クライアント、
+  Global 2 Edgeの全参加を必須にする
 - Jetson の PyTorch は `pypi.jetson-ai-lab.io` の wheel を使う (`pyproject.toml` で設定済み)
 - `config/topology.yaml` でトポロジーとデータ分割を定義

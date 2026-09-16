@@ -52,7 +52,11 @@ def main() -> None:
     address = srv_cfg.get("address", "0.0.0.0:8080")
     round_timeout = srv_cfg.get("round_timeout", 300.0)
     dr_cfg = cfg.get("dry_run", {})
-    num_rounds = dr_cfg.get("num_rounds", 1) if dry_run else srv_cfg.get("num_rounds", 10)
+    num_rounds = (
+        dr_cfg.get("global_rounds", 2)
+        if dry_run
+        else srv_cfg.get("num_rounds", 10)
+    )
 
     # --- モデル ---
     model_cfg = cfg.get("model", {})
@@ -96,6 +100,9 @@ def main() -> None:
         fraction_evaluate=0.0,  # 分散評価は無効 (evaluate_fn でサーバーサイド評価を行う)
         min_fit_clients=srv_cfg.get("min_fit_clients", 1),
         min_available_clients=srv_cfg.get("min_available_clients", 1),
+        min_evaluate_clients=srv_cfg.get("min_available_clients", 1),
+        accept_failures=False,
+        on_fit_config_fn=lambda server_round: {"parent_round": server_round},
     )
 
     # --- サーバー起動 ---

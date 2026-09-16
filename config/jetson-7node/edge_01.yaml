@@ -1,20 +1,20 @@
 # =============================================================================
-# Edge Server 02 固有設定
+# Jetson Orin Nano 7台実験: Edge Server 01 設定
 # =============================================================================
 
 edge:
-  id: "edge_02"
-  sub_server_address: "0.0.0.0:9002"
-  global_server_address: "127.0.0.1:8080"
+  id: "edge_01"
+  sub_server_address: "0.0.0.0:9001"
+  global_server_address: "192.168.10.201:8080"
 
   sub_rounds: 1
-  sub_round_timeout: 120.0
+  sub_round_timeout: 3600.0
   min_fit_clients: 3
   min_available_clients: 3
-  startup_timeout: 60.0
-  parent_model_timeout: 300.0
-  parent_result_timeout: 270.0
-  shutdown_timeout: 30.0
+  startup_timeout: 600.0
+  parent_model_timeout: 1800.0
+  parent_result_timeout: 3900.0
+  shutdown_timeout: 60.0
 
   contribution_factor: 1.0
 

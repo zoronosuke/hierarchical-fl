@@ -30,10 +30,11 @@ uv run ruff check src/                     # lint
 ```
 
 ## Architecture (IMPORTANT)
-- Edge Node の `fit()` 内で `flwr.server.start_server()` を呼ぶ入れ子構造
-- Internal Client は別スレッドで sub-server にループバック接続
+- Edge起動時に常駐sub-serverとInternal Clientを`spawn`子プロセスで1回だけ起動
+- Global Clientとsub-serverはQueueで親モデル・子集約結果を世代番号付きで同期
+- sub-serverは`global_rounds * sub_rounds`を連続実行しLeaf接続を維持
 - `start_server` / `start_client` は deprecated だが、入れ子構造では新 API が未対応のため使用
-- `evaluate_fn` callback で集約後パラメータを capture する
+- `uv.lock`の検証済みFlower版とlegacy APIを使用する
 
 ## Conventions
 - 設定はすべて YAML (config/ 配下)。ハードコーディング禁止
@@ -42,7 +43,7 @@ uv run ruff check src/                     # lint
 - 型ヒントは `from __future__ import annotations` を使用
 
 ## Known Issues / Gotchas
-- Flower の新しい ServerApp/ClientApp API は入れ子構造に非対応
+- Flower の新しい ServerApp/ClientApp API は現在の入れ子構造に移行していない
 - Jetson の PyTorch は `pypi.jetson-ai-lab.io` から入れないと GPU が使えない
 - `run.py` の `time.sleep()` はPoC用。本番ではヘルスチェックに置き換える
 - Edge の `_estimate_total_examples()` は推定値。要改善

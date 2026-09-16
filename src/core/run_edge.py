@@ -12,7 +12,7 @@ import argparse
 
 import flwr as fl
 
-from src.core.edge_node import EdgeNode
+from src.core.edge_node import EdgeNode, EdgeRuntime
 from src.utils.config import load_yaml
 from src.utils.logger import get_logger
 
@@ -36,23 +36,31 @@ def main() -> None:
     topo_cfg = load_yaml(args.topology_config)
     defaults_cfg = load_yaml(args.defaults_config)
 
-    edge_node = EdgeNode(
-        edge_config=edge_cfg,
-        global_config=global_cfg,
-        topology_config=topo_cfg,
-        defaults_config=defaults_cfg,
-    )
+    runtime = EdgeRuntime(edge_cfg, global_cfg, topo_cfg, defaults_cfg)
+    successful = False
+    try:
+        runtime.start()
+        edge_node = EdgeNode(
+            edge_config=edge_cfg,
+            global_config=global_cfg,
+            topology_config=topo_cfg,
+            defaults_config=defaults_cfg,
+            runtime=runtime,
+        )
 
-    # Global Server に接続
-    global_addr = edge_cfg["edge"].get("global_server_address", "127.0.0.1:8080")
-    logger.info(f"Connecting to Global Server at {global_addr}...")
-
-    fl.client.start_client(
-        server_address=global_addr,
-        client=edge_node.to_client(),
-        insecure=True,
-    )
-    logger.info("Edge Node finished.")
+        global_addr = edge_cfg["edge"].get("global_server_address", "127.0.0.1:8080")
+        logger.info(f"Connecting to Global Server at {global_addr}...")
+        fl.client.start_client(
+            server_address=global_addr,
+            client=edge_node.to_client(),
+            insecure=True,
+            max_retries=None,
+        )
+        successful = True
+        logger.info("Edge parent client finished.")
+    finally:
+        runtime.shutdown(successful=successful)
+    logger.info("Edge Node and persistent workers finished.")
 
 
 if __name__ == "__main__":

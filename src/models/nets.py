@@ -86,13 +86,48 @@ def create_model(
 
 def get_parameters(model: nn.Module) -> list[np.ndarray]:
     """モデルパラメータを NumPy 配列のリストとして返す。"""
-    return [val.cpu().numpy() for _, val in model.state_dict().items()]
+    return [val.detach().cpu().numpy().copy() for _, val in model.state_dict().items()]
 
 
 def set_parameters(model: nn.Module, parameters: list[np.ndarray]) -> None:
     """NumPy 配列のリストからモデルパラメータを設定する。"""
-    params_dict = zip(model.state_dict().keys(), parameters)
+    validate_parameters(model, parameters)
+    params_dict = zip(model.state_dict().keys(), parameters, strict=True)
     state_dict = OrderedDict(
-        {k: torch.tensor(v, dtype=torch.float32) for k, v in params_dict}
+        {
+            key: torch.from_numpy(np.asarray(value).copy()).to(dtype=reference.dtype)
+            for (key, reference), (_, value) in zip(
+                model.state_dict().items(), params_dict, strict=True
+            )
+        }
     )
     model.load_state_dict(state_dict, strict=True)
+
+
+def validate_parameters(model: nn.Module, parameters: list[np.ndarray]) -> None:
+    """Flowerパラメータがモデル構造と完全に一致することを検証する。"""
+    expected = list(model.state_dict().items())
+    if len(parameters) != len(expected):
+        raise ValueError(
+            f"Parameter count mismatch: expected {len(expected)}, got {len(parameters)}"
+        )
+
+    for index, ((name, tensor), value) in enumerate(zip(expected, parameters, strict=True)):
+        array = np.asarray(value)
+        expected_shape = tuple(tensor.shape)
+        if array.shape != expected_shape:
+            raise ValueError(
+                f"Parameter shape mismatch at index {index} ({name}): "
+                f"expected {expected_shape}, got {array.shape}"
+            )
+        expected_dtype = tensor.detach().cpu().numpy().dtype
+        if array.dtype != expected_dtype:
+            raise ValueError(
+                f"Parameter dtype mismatch at index {index} ({name}): "
+                f"expected {expected_dtype}, got {array.dtype}"
+            )
+
+
+def copy_parameters(parameters: list[np.ndarray]) -> list[np.ndarray]:
+    """プロセス・スレッド境界用にパラメータをディープコピーする。"""
+    return [np.asarray(value).copy() for value in parameters]

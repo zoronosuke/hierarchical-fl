@@ -6,8 +6,8 @@ server:
   address: "0.0.0.0:8080"
   num_rounds: 5
   round_timeout: 300.0          # 秒。Edgeからの応答待ち上限
-  min_fit_clients: 1            # 最低参加Edge数
-  min_available_clients: 1      # 起動待ち最低Edge数
+  min_fit_clients: 2            # 疎通試験・標準構成では全Edge必須
+  min_available_clients: 2      # 起動待ちも全Edge必須
   fraction_fit: 1.0             # 各ラウンドで参加させるEdgeの割合
 
 # 集約戦略 ("fedavg" のみ。将来 "fedprox", "scaffold" 等を追加可能)
@@ -33,6 +33,7 @@ evaluation:
 # 動作モード
 mode: "production"              # "production" | "dry_run"
 dry_run:
-  num_rounds: 1
+  global_rounds: 2
+  sub_rounds: 1
   dummy_data_size: 64
   dummy_steps: 2

@@ -1,0 +1,34 @@
+# =============================================================================
+# Jetson Orin Nano 7台実験: Global Server 設定
+# =============================================================================
+
+server:
+  address: "0.0.0.0:8080"
+  num_rounds: 5
+  round_timeout: 4200.0         # Edge集約完了を最大70分待つ
+  min_fit_clients: 2
+  min_available_clients: 2
+  fraction_fit: 1.0
+
+strategy:
+  name: "fedavg"
+  params: {}
+
+model:
+  name: "simplecnn"
+  num_classes: 10
+
+dataset:
+  name: "cifar10"
+  test_batch_size: 128
+
+evaluation:
+  enabled: true
+  log_dir: "./runs"
+
+mode: "production"
+dry_run:
+  global_rounds: 2
+  sub_rounds: 1
+  dummy_data_size: 64
+  dummy_steps: 2
