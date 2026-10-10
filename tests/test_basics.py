@@ -62,6 +62,52 @@ def test_jetson_7node_config():
     assert sorted(assignments.values()) == list(range(6))
 
 
+
+def test_5tier_configs():
+    """5段構成の親子アドレス・タイムアウト連鎖・Partitionが整合する。"""
+    from src.utils.config import load_yaml
+
+    repository = Path(__file__).resolve().parents[1]
+    for config_dir, global_file in (
+        ("config/jetson-5tier", "config/jetson-5tier/global.yaml"),
+        ("config/local-5tier", "config/global.yaml"),
+    ):
+        global_config = load_yaml(repository / global_file)
+        topology = load_yaml(repository / config_dir / "topology.yaml")
+        edges = topology["edges"]
+        assert list(edges) == ["edge_01", "edge_02", "leaf_01", "leaf_03"]
+
+        configs = {
+            edge_id: load_yaml(repository / info["config_file"])["edge"]
+            for edge_id, info in edges.items()
+        }
+        parents = {
+            child: parent
+            for parent, info in edges.items()
+            for child in info["leaf_clients"]
+            if child in edges
+        }
+        assert parents == {"leaf_01": "edge_01", "leaf_03": "leaf_01"}
+
+        for edge_id, ec in configs.items():
+            participants = len(edges[edge_id]["leaf_clients"]) + 1
+            assert ec["min_available_clients"] == participants
+            assert ec["parent_result_timeout"] > ec["sub_round_timeout"]
+            parent = parents.get(edge_id)
+            if parent is None:
+                assert ec["global_server_address"].endswith(":8080")
+                parent_timeout = global_config["server"]["round_timeout"]
+            else:
+                parent_port = configs[parent]["sub_server_address"].rsplit(":", 1)[1]
+                assert ec["global_server_address"].endswith(f":{parent_port}")
+                parent_timeout = configs[parent]["sub_round_timeout"]
+                assert ec["parent_round_timeout"] == parent_timeout
+            assert parent_timeout > ec["parent_result_timeout"]
+
+        assignments = topology["data_partition"]["assignments"]
+        assert sorted(assignments.values()) == list(range(6))
+        assert topology["data_partition"]["total_partitions"] == 6
+
 def test_resolve_device():
     """デバイス解決。"""
     from src.utils.config import resolve_device

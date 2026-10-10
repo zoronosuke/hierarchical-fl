@@ -1,0 +1,56 @@
+# =============================================================================
+# 5段HFLトポロジー: Global - Edge 01 - L01 - L03 - L04
+#
+#                 Global
+#            ┌──────┴──────┐
+#         Edge 01        Edge 02
+#      ┌─────┼─────┐        │
+#     L01   L02  Internal Internal
+#   ┌──┴──┐
+#  L03  Internal
+#  ┌┴──┐
+# L04 Internal
+#
+# leaf_clients は直下の子ノード (Internal Client以外)。
+# 子が edges に含まれる場合、その子は run_edge で起動する中継ノードになる。
+# edges は親から子の順に記載する (run.py はこの順で起動する)。
+# =============================================================================
+
+edges:
+  edge_01:
+    config_file: "config/local-5tier/edge_01.yaml"
+    leaf_clients:
+      - leaf_01
+      - leaf_02
+
+  edge_02:
+    config_file: "config/local-5tier/edge_02.yaml"
+    leaf_clients: []
+
+  leaf_01:
+    config_file: "config/local-5tier/leaf_01.yaml"
+    leaf_clients:
+      - leaf_03
+
+  leaf_03:
+    config_file: "config/local-5tier/leaf_03.yaml"
+    leaf_clients:
+      - leaf_04
+
+data_partition:
+  method: "dirichlet"
+  params:
+    alpha: 0.5
+    min_partition_size: 10
+    seed: 42
+
+  # 中継ノード(L01, L03)は自身のInternal Clientで学習する
+  assignments:
+    edge_01_internal: 0
+    leaf_01_internal: 1
+    leaf_02: 2
+    edge_02_internal: 3
+    leaf_03_internal: 4
+    leaf_04: 5
+
+  total_partitions: 6

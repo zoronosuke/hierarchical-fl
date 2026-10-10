@@ -1,0 +1,22 @@
+# =============================================================================
+# 1PC 5段HFL疎通試験: edge_02 設定
+# =============================================================================
+
+edge:
+  id: "edge_02"
+  sub_server_address: "0.0.0.0:9002"
+  global_server_address: "127.0.0.1:8080"   # 直上サーバー (Global または上位Edge)
+
+  sub_rounds: 1
+  sub_round_timeout: 240.0
+  min_fit_clients: 1
+  min_available_clients: 1
+  startup_timeout: 60.0
+  parent_model_timeout: 300.0
+  parent_result_timeout: 270.0
+  shutdown_timeout: 30.0
+
+  contribution_factor: 1.0
+
+  internal_client:
+    enabled: true

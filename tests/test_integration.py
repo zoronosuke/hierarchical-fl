@@ -56,3 +56,50 @@ def test_persistent_hfl_two_global_rounds():
     )
     first_disconnect = log.find("Disconnect and shut down")
     assert first_disconnect == -1 or first_disconnect > final_child_completion
+
+
+def test_persistent_hfl_5tier_two_global_rounds():
+    """Global - Edge 01 - L01 - L03 - L04 の5段構成を1PCで2ラウンド実行する。"""
+    repository = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "run.py",
+            "--dry-run",
+            "--topology-config",
+            "config/local-5tier/topology.yaml",
+            "--completion-timeout",
+            "150",
+        ],
+        cwd=repository,
+        capture_output=True,
+        text=True,
+        timeout=200,
+        check=False,
+    )
+    log = completed.stdout + completed.stderr
+    assert completed.returncode == 0, log
+    assert log.count("Persistent sub-server starting on") == 4
+    assert "All processes completed successfully" in log
+
+    for client_id in (
+        "edge_01_internal",
+        "leaf_01_internal",
+        "leaf_02",
+        "edge_02_internal",
+        "leaf_03_internal",
+        "leaf_04",
+    ):
+        assert log.count(f"[{client_id}] fit complete:") == 2
+
+    for edge_id, results in (
+        ("edge_01", 3),
+        ("edge_02", 1),
+        ("leaf_01", 2),
+        ("leaf_03", 2),
+    ):
+        assert log.count(f"[{edge_id}] Parent generation complete:") == 2
+        assert (
+            f"[{edge_id}] Parent generation complete: "
+            f"parent_round=2, child_round=2, results={results}"
+        ) in log

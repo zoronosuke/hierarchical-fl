@@ -1,0 +1,24 @@
+# =============================================================================
+# 1PC 5段HFL疎通試験: leaf_01 設定
+# =============================================================================
+
+edge:
+  id: "leaf_01"
+  sub_server_address: "0.0.0.0:9003"
+  global_server_address: "127.0.0.1:9001"   # 直上サーバー (Global または上位Edge)
+
+  sub_rounds: 1
+  sub_round_timeout: 180.0
+  min_fit_clients: 2
+  min_available_clients: 2
+  startup_timeout: 60.0
+  parent_model_timeout: 300.0
+  parent_result_timeout: 210.0
+  parent_round_timeout: 240.0         # 直上Edgeのsub_round_timeoutと一致させる
+  upstream_sub_rounds: 1           # 祖先Edgeのsub_roundsの積
+  shutdown_timeout: 30.0
+
+  contribution_factor: 1.0
+
+  internal_client:
+    enabled: true

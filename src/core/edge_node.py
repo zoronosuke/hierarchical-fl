@@ -54,6 +54,7 @@ class EdgeRuntime:
         self.sub_server_process: mp.Process | None = None
         self.internal_client_process: mp.Process | None = None
         self.last_event: WorkerEvent | None = None
+        self.sub_server_started = False
 
     def start(self) -> None:
         ec = self.edge_config["edge"]
@@ -91,16 +92,14 @@ class EdgeRuntime:
         started = time.monotonic()
         while time.monotonic() - started < timeout:
             self.raise_if_failed()
+            if self.sub_server_started:
+                logger.info(f"[{self.edge_id}] Child server process is ready.")
+                return
             try:
                 event = self.event_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
-            self.last_event = event
-            if event.kind == "error":
-                raise RuntimeError(f"[{self.edge_id}] {event.worker} failed:\n{event.message}")
-            if event.worker == "sub_server" and event.kind == "started":
-                logger.info(f"[{self.edge_id}] Child server process is ready.")
-                return
+            self._handle_event(event)
         raise TimeoutError(
             f"[{self.edge_id}] Startup timeout: edge_id={self.edge_id}, "
             "parent_round=0, child_round=0, connected_clients=0, "
@@ -108,15 +107,21 @@ class EdgeRuntime:
             f"waited={timeout:.1f}s"
         )
 
+    def _handle_event(self, event: WorkerEvent) -> None:
+        # drain_eventsで読んだ起動イベントも取りこぼさないようフラグで保持する
+        self.last_event = event
+        if event.kind == "error":
+            raise RuntimeError(f"[{self.edge_id}] {event.worker} failed:\n{event.message}")
+        if event.worker == "sub_server" and event.kind == "started":
+            self.sub_server_started = True
+
     def drain_events(self) -> None:
         while True:
             try:
                 event = self.event_queue.get_nowait()
             except queue.Empty:
                 return
-            self.last_event = event
-            if event.kind == "error":
-                raise RuntimeError(f"[{self.edge_id}] {event.worker} failed:\n{event.message}")
+            self._handle_event(event)
 
     def raise_if_failed(self) -> None:
         for process in (self.sub_server_process, self.internal_client_process):
@@ -185,17 +190,21 @@ class EdgeNode(fl.client.NumPyClient):
         required_child_time = self.sub_rounds * float(
             ec.get("sub_round_timeout", 120.0)
         )
-        global_timeout = float(
-            global_config.get("server", {}).get("round_timeout", 300.0)
+        # 入れ子Edgeでは直上Edgeのsub_round_timeoutを parent_round_timeout に設定する
+        parent_timeout = float(
+            ec.get(
+                "parent_round_timeout",
+                global_config.get("server", {}).get("round_timeout", 300.0),
+            )
         )
         if self.result_timeout <= required_child_time:
             raise ValueError(
                 f"[{self.edge_id}] parent_result_timeout={self.result_timeout} must "
                 f"exceed sub_rounds * sub_round_timeout={required_child_time}"
             )
-        if global_timeout <= self.result_timeout:
+        if parent_timeout <= self.result_timeout:
             raise ValueError(
-                f"[{self.edge_id}] Global round_timeout={global_timeout} must exceed "
+                f"[{self.edge_id}] Parent round_timeout={parent_timeout} must exceed "
                 f"parent_result_timeout={self.result_timeout}"
             )
         self.expected_clients = len(
@@ -256,7 +265,9 @@ class EdgeNode(fl.client.NumPyClient):
     def fit(
         self, parameters: NDArrays, config: dict[str, Scalar]
     ) -> tuple[NDArrays, int, dict[str, Scalar]]:
-        raw_round = config.get("parent_round")
+        # 直上サーバーのラウンド番号。Globalはparent_roundのみ、
+        # 上位Edgeのsub-serverは自身のラウンドをchild_roundとして送る。
+        raw_round = config.get("child_round", config.get("parent_round"))
         if not isinstance(raw_round, int):
             raise ValueError(
                 f"[{self.edge_id}] Missing integer parent_round in fit config"

@@ -32,7 +32,8 @@ uv run ruff check src/                     # lint
 ## Architecture (IMPORTANT)
 - Edge起動時に常駐sub-serverとInternal Clientを`spawn`子プロセスで1回だけ起動
 - Global Clientとsub-serverはQueueで親モデル・子集約結果を世代番号付きで同期
-- sub-serverは`global_rounds * sub_rounds`を連続実行しLeaf接続を維持
+- sub-serverは`global_rounds * upstream_sub_rounds * sub_rounds`を連続実行しLeaf接続を維持
+- Edgeは入れ子にできる (上位Edgeのsub-serverへ接続する中継ノード)。5段構成は`config/jetson-5tier/`と`docs/jetson-5tier-experiment.md`
 - `start_server` / `start_client` は deprecated だが、入れ子構造では新 API が未対応のため使用
 - `uv.lock`の検証済みFlower版とlegacy APIを使用する
 

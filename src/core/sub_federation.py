@@ -263,8 +263,10 @@ def run_sub_server(
             if dry_run
             else int(ec.get("sub_rounds", 1))
         )
+        # 入れ子Edgeでは祖先Edgeのsub_roundsの積を upstream_sub_rounds に設定する
+        upstream_sub_rounds = int(ec.get("upstream_sub_rounds", 1))
         expected_clients = int(ec["min_available_clients"])
-        total_child_rounds = global_rounds * sub_rounds
+        total_child_rounds = global_rounds * upstream_sub_rounds * sub_rounds
 
         model_cfg = global_config.get("model", {})
         dataset_cfg = global_config.get("dataset", {})

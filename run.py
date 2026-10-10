@@ -143,8 +143,8 @@ def main() -> int:
         )
         _wait_for_listener(global_process, global_address, args.startup_timeout)
 
+        # 入れ子Edgeは親Edgeの待受後に起動するため、topology記載順に1台ずつ起動する
         edges = topology_cfg.get("edges", {})
-        edge_processes: dict[str, tuple[ManagedProcess, str]] = {}
         for edge_id, edge_info in edges.items():
             edge_config_file = edge_info.get(
                 "config_file", f"config/edge/{edge_id}.yaml"
@@ -167,13 +167,11 @@ def main() -> int:
                 ],
             )
             edge_cfg = load_yaml(edge_config_file)
-            edge_processes[edge_id] = (
+            _wait_for_listener(
                 edge_process,
                 edge_cfg["edge"]["sub_server_address"],
+                args.startup_timeout,
             )
-
-        for edge_process, address in edge_processes.values():
-            _wait_for_listener(edge_process, address, args.startup_timeout)
 
         assignments = topology_cfg.get("data_partition", {}).get("assignments", {})
         for edge_id, edge_info in edges.items():
@@ -185,6 +183,8 @@ def main() -> int:
                 "0.0.0.0", "127.0.0.1"
             )
             for leaf_id in edge_info.get("leaf_clients", []):
+                if leaf_id in edges:
+                    continue  # 子がEdge(中継ノード)の場合は上で起動済み
                 launch(
                     leaf_id,
                     [
