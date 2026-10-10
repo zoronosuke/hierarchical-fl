@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import queue
+import sys
 import time
 import traceback
 from dataclasses import dataclass
@@ -20,19 +22,24 @@ from flwr.common import (
     ndarrays_to_parameters,
     parameters_to_ndarrays,
 )
-from flwr.server import ServerConfig
+from flwr.server import ServerConfig, SimpleClientManager
 from flwr.server.client_manager import ClientManager
 from flwr.server.client_proxy import ClientProxy
 
 from src.core.client import HFLClient
+from src.core.stoppable_server import STOP_REQUESTED, StoppableServer, StopRun
 from src.core.training import evaluate_model
 from src.data.loader import create_dummy_dataloader, load_test_data
 from src.models.nets import copy_parameters, create_model, get_parameters, set_parameters
 from src.strategies.aggregation import WeightedFedAvg
 from src.utils.config import resolve_device
+from src.utils.events import get_event_logger
 from src.utils.logger import get_logger
 
 logger = get_logger("sub_federation")
+
+# 親モデル待ち・停止要求のポーリング間隔 (秒)
+_PARENT_POLL_INTERVAL = 0.5
 
 
 def _start_client_with_retry(
@@ -74,6 +81,7 @@ def _start_client_with_retry(
 class ParentModelRequest:
     parent_round: int
     parameters: NDArrays
+    global_round: int = 0  # Global Server のラウンド番号 (階層を下っても変わらない)
 
 
 @dataclass
@@ -115,6 +123,7 @@ class SynchronousSubFedAvg(WeightedFedAvg):
         result_queue: Queue,
         event_queue: Queue,
         parent_model_timeout: float,
+        stop_event: Any = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(accept_failures=False, **kwargs)
@@ -125,8 +134,48 @@ class SynchronousSubFedAvg(WeightedFedAvg):
         self.result_queue = result_queue
         self.event_queue = event_queue
         self.parent_model_timeout = parent_model_timeout
+        self.stop_event = stop_event
         self.current_parent_round = 0
+        self.current_global_round = 0
         self.current_parent_parameters: Parameters | None = None
+
+    def _round_fields(self, server_round: int) -> dict[str, int]:
+        return {
+            "global_round": self.current_global_round,
+            "parent_round": parent_round_for_child(server_round, self.sub_rounds),
+            "child_round": server_round,
+        }
+
+    def _wait_for_parent_model(
+        self, parent_round: int, server_round: int, connected: int
+    ) -> ParentModelRequest:
+        """停止要求を見ながら親モデルを待つ。"""
+        started = time.monotonic()
+        while True:
+            if self.stop_event is not None and self.stop_event.is_set():
+                raise StopRun(STOP_REQUESTED)
+            remaining = self.parent_model_timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                waited = time.monotonic() - started
+                message = (
+                    f"[{self.edge_id}] Parent model timeout: edge_id={self.edge_id}, "
+                    f"parent_round={parent_round}, child_round={server_round}, "
+                    f"connected_clients={connected}, expected_clients={self.expected_clients}, "
+                    f"waited={waited:.1f}s"
+                )
+                logger.error(message)
+                raise TimeoutError(message)
+            try:
+                request = self.parent_queue.get(timeout=min(_PARENT_POLL_INTERVAL, remaining))
+            except queue.Empty:
+                continue
+            self.event_logger.emit(
+                "parent_model_received",
+                parent_round=parent_round,
+                child_round=server_round,
+                waited_s=round(time.monotonic() - started, 3),
+            )
+            return request
 
     def configure_fit(
         self,
@@ -139,19 +188,7 @@ class SynchronousSubFedAvg(WeightedFedAvg):
         first_child_round = (server_round - 1) % self.sub_rounds == 0
 
         if first_child_round:
-            started = time.monotonic()
-            try:
-                request = self.parent_queue.get(timeout=self.parent_model_timeout)
-            except queue.Empty as exc:
-                waited = time.monotonic() - started
-                message = (
-                    f"[{self.edge_id}] Parent model timeout: edge_id={self.edge_id}, "
-                    f"parent_round={parent_round}, child_round={server_round}, "
-                    f"connected_clients={connected}, expected_clients={self.expected_clients}, "
-                    f"waited={waited:.1f}s"
-                )
-                logger.error(message)
-                raise TimeoutError(message) from exc
+            request = self._wait_for_parent_model(parent_round, server_round, connected)
 
             if not isinstance(request, ParentModelRequest):
                 raise TypeError(f"Unexpected parent queue message: {type(request)!r}")
@@ -167,6 +204,7 @@ class SynchronousSubFedAvg(WeightedFedAvg):
                     f"previous={self.current_parent_round}, got={request.parent_round}"
                 )
             self.current_parent_round = request.parent_round
+            self.current_global_round = request.global_round or request.parent_round
             self.current_parent_parameters = ndarrays_to_parameters(
                 copy_parameters(request.parameters)
             )
@@ -180,6 +218,7 @@ class SynchronousSubFedAvg(WeightedFedAvg):
         fit_config = {
             "parent_round": parent_round,
             "child_round": server_round,
+            "global_round": self.current_global_round,
         }
         sample_size, min_num_clients = self.num_fit_clients(connected)
         clients = client_manager.sample(
@@ -196,6 +235,12 @@ class SynchronousSubFedAvg(WeightedFedAvg):
                 connected_clients=connected,
                 expected_clients=self.expected_clients,
             )
+        )
+        self.event_logger.emit(
+            "round_start",
+            **self._round_fields(server_round),
+            connected_clients=connected,
+            expected_clients=self.expected_clients,
         )
         return [(client, FitIns(parameters, fit_config)) for client in clients]
 
@@ -236,6 +281,12 @@ class SynchronousSubFedAvg(WeightedFedAvg):
                 f"parent_round={parent_round}, child_round={server_round}, "
                 f"results={len(results)}"
             )
+            self.event_logger.emit(
+                "child_result_sent",
+                **self._round_fields(server_round),
+                results=len(results),
+                total_examples=total_examples,
+            )
         return aggregated, metrics
 
 
@@ -246,10 +297,13 @@ def run_sub_server(
     parent_queue: Queue,
     result_queue: Queue,
     event_queue: Queue,
+    stop_event: Any = None,
 ) -> None:
     """spawnされたプロセスのメインスレッドで常駐子サーバーを実行する。"""
     ec = edge_config["edge"]
     edge_id = ec["id"]
+    event_logger = get_event_logger("sub_server")
+    started_at = time.monotonic()
     try:
         dry_run = global_config.get("mode") == "dry_run"
         dry_cfg = global_config.get("dry_run", {})
@@ -304,12 +358,20 @@ def run_sub_server(
                     f"[{edge_id}] Initial sub-server evaluation: "
                     f"loss={loss:.4f}, accuracy={accuracy:.4f}, n={sample_count}"
                 )
+                event_logger.emit(
+                    "eval", parent_round=0, child_round=0,
+                    loss=float(loss), accuracy=float(accuracy), n=sample_count,
+                )
                 return float(loss), {"accuracy": float(accuracy)}
             parent_round = parent_round_for_child(child_round, sub_rounds)
             logger.info(
                 f"[{edge_id}] Sub-round evaluation: parent_round={parent_round}, "
                 f"child_round={child_round}, loss={loss:.4f}, "
                 f"accuracy={accuracy:.4f}, n={sample_count}"
+            )
+            event_logger.emit(
+                "eval", **strategy._round_fields(child_round),
+                loss=float(loss), accuracy=float(accuracy), n=sample_count,
             )
             return float(loss), {"accuracy": float(accuracy)}
 
@@ -321,6 +383,8 @@ def run_sub_server(
             result_queue=result_queue,
             event_queue=event_queue,
             parent_model_timeout=float(ec.get("parent_model_timeout", 300.0)),
+            stop_event=stop_event,
+            event_logger=event_logger,
             evaluate_fn=evaluate_fn,
             fraction_fit=1.0,
             fraction_evaluate=0.0,
@@ -341,18 +405,40 @@ def run_sub_server(
                 expected_clients=expected_clients,
             )
         )
+        event_logger.emit(
+            "start",
+            argv=sys.argv[1:],
+            address=ec["sub_server_address"],
+            num_rounds=total_child_rounds,
+            expected_clients=expected_clients,
+            dry_run=dry_run,
+        )
+        # 親の接続が終わったら EdgeRuntime.shutdown() が stop_event を立て、
+        # 次の親モデル待ちで StopRun → 子クライアントへ正常な切断通知を送る
+        server = StoppableServer(
+            client_manager=SimpleClientManager(),
+            strategy=strategy,
+            stop_event=stop_event,
+            stop_file=os.environ.get("HFL_STOP_FILE"),
+        )
         fl.server.start_server(
             server_address=ec["sub_server_address"],
+            server=server,
             config=ServerConfig(
                 num_rounds=total_child_rounds,
                 round_timeout=float(ec.get("sub_round_timeout", 120.0)),
             ),
-            strategy=strategy,
         )
         event_queue.put(
             WorkerEvent(worker="sub_server", kind="finished", message="Server finished")
         )
-    except BaseException:
+        event_logger.emit(
+            "stop",
+            reason=server.stop_reason or "finished",
+            elapsed_s=round(time.monotonic() - started_at, 1),
+        )
+    except BaseException as exc:
+        event_logger.emit_error(exc)
         event_queue.put(
             WorkerEvent(
                 worker="sub_server",
@@ -361,6 +447,8 @@ def run_sub_server(
             )
         )
         raise
+    finally:
+        event_logger.close()
 
 
 def run_internal_client(
@@ -373,6 +461,8 @@ def run_internal_client(
     """Internal Clientを一度だけ接続し、全子Roundに参加させる。"""
     ec = edge_config["edge"]
     edge_id = ec["id"]
+    event_logger = get_event_logger("internal_client")
+    started_at = time.monotonic()
     try:
         dry_run = global_config.get("mode") == "dry_run"
         model_cfg = global_config.get("model", {})
@@ -396,6 +486,7 @@ def run_internal_client(
             device=edge_config.get("device", defaults_config.get("device", "auto")),
             dry_run=dry_run,
             dry_run_config=global_config.get("dry_run", {}),
+            event_logger=event_logger,
         )
         address = ec["sub_server_address"].replace("0.0.0.0", "127.0.0.1")
         event_queue.put(
@@ -404,6 +495,10 @@ def run_internal_client(
                 kind="started",
                 message=f"Connecting to {address}",
             )
+        )
+        event_logger.emit(
+            "start", argv=sys.argv[1:], client_id=client.client_id,
+            address=address, dry_run=dry_run,
         )
         _start_client_with_retry(
             server_address=address,
@@ -417,7 +512,11 @@ def run_internal_client(
                 message="Internal client finished",
             )
         )
-    except BaseException:
+        event_logger.emit(
+            "stop", reason="finished", elapsed_s=round(time.monotonic() - started_at, 1)
+        )
+    except BaseException as exc:
+        event_logger.emit_error(exc)
         event_queue.put(
             WorkerEvent(
                 worker="internal_client",
@@ -426,3 +525,5 @@ def run_internal_client(
             )
         )
         raise
+    finally:
+        event_logger.close()

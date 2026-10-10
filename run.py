@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from src.utils.config import load_yaml
 from src.utils.logger import get_logger
@@ -98,6 +99,18 @@ def main() -> int:
         default=120.0,
         help="Global/EdgeのTCP待受開始を待つ上限秒数",
     )
+    parser.add_argument(
+        "--max-hours",
+        type=float,
+        default=None,
+        help="Global の時間上限 (ラウンド境界で全体を正常停止)",
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="指定すると <log-dir>/<run-id>/events-<name>.jsonl にイベントを記録する",
+    )
+    parser.add_argument("--log-dir", default="logs")
     args = parser.parse_args()
 
     global_cfg = load_yaml(args.global_config)
@@ -106,8 +119,12 @@ def main() -> int:
         _pre_download_dataset(global_cfg.get("dataset", {}).get("name", "cifar10"))
 
     dry_run_flag = ["--dry-run"] if args.dry_run else []
+    max_hours_flag = ["--max-hours", str(args.max_hours)] if args.max_hours is not None else []
     python = sys.executable
-    sub_env = {**os.environ, "HF_DATASETS_OFFLINE": "1"}
+    sub_env = {**os.environ, "HF_DATASETS_OFFLINE": "1", "HF_HUB_OFFLINE": "1"}
+    run_dir = Path(args.log_dir) / args.run_id if args.run_id else None
+    if run_dir is not None:
+        run_dir.mkdir(parents=True, exist_ok=True)
     processes: list[ManagedProcess] = []
     interrupted = False
 
@@ -121,7 +138,16 @@ def main() -> int:
 
     def launch(name: str, command: list[str]) -> ManagedProcess:
         logger.info(f"Starting {name}...")
-        process = subprocess.Popen(command, env=sub_env)
+        env = dict(sub_env)
+        if run_dir is not None:
+            # Jetson の scripts/hfl.sh start と同じ環境変数で、1PC でもイベント記録を試せる
+            env.update(
+                HFL_RUN_ID=args.run_id,
+                HFL_NODE_ID=name,
+                HFL_EVENT_LOG=str(run_dir / f"events-{name}.jsonl"),
+                HFL_STOP_FILE=str(run_dir / "STOP"),
+            )
+        process = subprocess.Popen(command, env=env)
         managed = ManagedProcess(name, process)
         processes.append(managed)
         return managed
@@ -136,6 +162,7 @@ def main() -> int:
                 "--config",
                 args.global_config,
                 *dry_run_flag,
+                *max_hours_flag,
             ],
         )
         global_address = global_cfg.get("server", {}).get(

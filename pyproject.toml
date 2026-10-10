@@ -19,6 +19,10 @@ dev = [
     "pytest>=7.0",
     "ruff>=0.1.0",
 ]
+# PC での可視化用 (scripts/plot_run.py)。Jetson の uv sync には入らない
+analysis = [
+    "matplotlib>=3.7",
+]
 
 [build-system]
 requires = ["hatchling"]

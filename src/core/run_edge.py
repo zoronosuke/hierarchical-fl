@@ -9,11 +9,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sys
+import time
 
 import flwr as fl
 
 from src.core.edge_node import EdgeNode, EdgeRuntime
 from src.utils.config import load_yaml
+from src.utils.events import get_event_logger
 from src.utils.logger import get_logger
 
 logger = get_logger("run_edge")
@@ -27,40 +30,59 @@ def main() -> None:
     parser.add_argument("--defaults-config", type=str, default="config/defaults.yaml")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    event_logger = get_event_logger("edge")
+    started_at = time.monotonic()
 
-    global_cfg = load_yaml(args.global_config)
-    if args.dry_run:
-        global_cfg["mode"] = "dry_run"
-
-    edge_cfg = load_yaml(args.edge_config)
-    topo_cfg = load_yaml(args.topology_config)
-    defaults_cfg = load_yaml(args.defaults_config)
-
-    runtime = EdgeRuntime(edge_cfg, global_cfg, topo_cfg, defaults_cfg)
-    successful = False
     try:
-        runtime.start()
-        edge_node = EdgeNode(
-            edge_config=edge_cfg,
-            global_config=global_cfg,
-            topology_config=topo_cfg,
-            defaults_config=defaults_cfg,
-            runtime=runtime,
+        global_cfg = load_yaml(args.global_config)
+        if args.dry_run:
+            global_cfg["mode"] = "dry_run"
+
+        edge_cfg = load_yaml(args.edge_config)
+        topo_cfg = load_yaml(args.topology_config)
+        defaults_cfg = load_yaml(args.defaults_config)
+        global_addr = edge_cfg["edge"].get("global_server_address", "127.0.0.1:8080")
+        event_logger.emit(
+            "start",
+            argv=sys.argv[1:],
+            config=args.edge_config,
+            parent_address=global_addr,
+            dry_run=args.dry_run,
         )
 
-        global_addr = edge_cfg["edge"].get("global_server_address", "127.0.0.1:8080")
-        logger.info(f"Connecting to Global Server at {global_addr}...")
-        fl.client.start_client(
-            server_address=global_addr,
-            client=edge_node.to_client(),
-            insecure=True,
-            max_retries=None,
+        runtime = EdgeRuntime(edge_cfg, global_cfg, topo_cfg, defaults_cfg)
+        successful = False
+        try:
+            runtime.start()
+            edge_node = EdgeNode(
+                edge_config=edge_cfg,
+                global_config=global_cfg,
+                topology_config=topo_cfg,
+                defaults_config=defaults_cfg,
+                runtime=runtime,
+                event_logger=event_logger,
+            )
+
+            logger.info(f"Connecting to Global Server at {global_addr}...")
+            fl.client.start_client(
+                server_address=global_addr,
+                client=edge_node.to_client(),
+                insecure=True,
+                max_retries=None,
+            )
+            successful = True
+            logger.info("Edge parent client finished.")
+        finally:
+            runtime.shutdown(successful=successful)
+        logger.info("Edge Node and persistent workers finished.")
+        event_logger.emit(
+            "stop", reason="finished", elapsed_s=round(time.monotonic() - started_at, 1)
         )
-        successful = True
-        logger.info("Edge parent client finished.")
+    except BaseException as exc:
+        event_logger.emit_error(exc)
+        raise
     finally:
-        runtime.shutdown(successful=successful)
-    logger.info("Edge Node and persistent workers finished.")
+        event_logger.close()
 
 
 if __name__ == "__main__":

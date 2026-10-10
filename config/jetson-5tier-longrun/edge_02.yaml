@@ -1,0 +1,24 @@
+# =============================================================================
+# Jetson Orin Nano 7台 5段HFL 長時間実験: edge_02 設定
+# タイムアウト連鎖: sub_round_timeout < parent_result_timeout < 直上の round_timeout
+#                   parent_model_timeout > Global round_timeout (1500) + 余裕
+# =============================================================================
+
+edge:
+  id: "edge_02"
+  sub_server_address: "0.0.0.0:9002"
+  global_server_address: "192.168.10.201:8080"   # 直上サーバー (Global または上位Edge)
+
+  sub_rounds: 1
+  sub_round_timeout: 1200.0
+  min_fit_clients: 1
+  min_available_clients: 1
+  startup_timeout: 600.0
+  parent_model_timeout: 2400.0
+  parent_result_timeout: 1260.0
+  shutdown_timeout: 120.0
+
+  contribution_factor: 1.0
+
+  internal_client:
+    enabled: true

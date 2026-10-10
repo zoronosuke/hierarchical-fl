@@ -27,6 +27,7 @@ from src.models.nets import (
     validate_parameters,
 )
 from src.utils.config import resolve_device
+from src.utils.events import EventLogger
 from src.utils.logger import get_logger
 
 logger = get_logger("edge")
@@ -51,6 +52,8 @@ class EdgeRuntime:
         self.parent_queue = self.context.Queue(maxsize=1)
         self.result_queue = self.context.Queue(maxsize=1)
         self.event_queue = self.context.Queue()
+        # 親との接続が終わったら立てる。sub-server はラウンド境界で正常停止する
+        self.stop_event = self.context.Event()
         self.sub_server_process: mp.Process | None = None
         self.internal_client_process: mp.Process | None = None
         self.last_event: WorkerEvent | None = None
@@ -68,6 +71,7 @@ class EdgeRuntime:
                 self.parent_queue,
                 self.result_queue,
                 self.event_queue,
+                self.stop_event,
             ),
         )
         self.sub_server_process.start()
@@ -139,6 +143,8 @@ class EdgeRuntime:
             for process in (self.internal_client_process, self.sub_server_process)
             if process is not None
         ]
+        # sub-server に停止を要求し、子クライアントへ正常な切断通知を送らせる
+        self.stop_event.set()
         if successful:
             for process in processes:
                 process.join(timeout=timeout)
@@ -179,10 +185,12 @@ class EdgeNode(fl.client.NumPyClient):
         topology_config: dict[str, Any],
         defaults_config: dict[str, Any],
         runtime: EdgeRuntime,
+        event_logger: EventLogger | None = None,
     ) -> None:
         ec = edge_config["edge"]
         self.runtime = runtime
         self.edge_id = ec["id"]
+        self.event_logger = event_logger or EventLogger(None)
         self.contribution_factor = float(ec.get("contribution_factor", 1.0))
         self.result_timeout = float(ec.get("parent_result_timeout", 180.0))
         self.expected_parent_round = 1
@@ -197,6 +205,7 @@ class EdgeNode(fl.client.NumPyClient):
                 global_config.get("server", {}).get("round_timeout", 300.0),
             )
         )
+        parent_model_timeout = float(ec.get("parent_model_timeout", 300.0))
         if self.result_timeout <= required_child_time:
             raise ValueError(
                 f"[{self.edge_id}] parent_result_timeout={self.result_timeout} must "
@@ -206,6 +215,12 @@ class EdgeNode(fl.client.NumPyClient):
             raise ValueError(
                 f"[{self.edge_id}] Parent round_timeout={parent_timeout} must exceed "
                 f"parent_result_timeout={self.result_timeout}"
+            )
+        # 次の親モデルは、直上サーバーが他の子を round_timeout まで待った後に届きうる
+        if parent_model_timeout <= parent_timeout:
+            raise ValueError(
+                f"[{self.edge_id}] parent_model_timeout={parent_model_timeout} must exceed "
+                f"parent round_timeout={parent_timeout}"
             )
         self.expected_clients = len(
             topology_config.get("edges", {}).get(self.edge_id, {}).get("leaf_clients", [])
@@ -278,11 +293,18 @@ class EdgeNode(fl.client.NumPyClient):
                 f"[{self.edge_id}] Non-sequential Global round: "
                 f"expected={self.expected_parent_round}, got={parent_round}"
             )
+        global_round = config.get("global_round", parent_round)
+        global_round = int(global_round) if isinstance(global_round, int) else parent_round
         validate_parameters(self.model, parameters)
-        request = ParentModelRequest(parent_round, copy_parameters(parameters))
+        request = ParentModelRequest(
+            parent_round, copy_parameters(parameters), global_round=global_round
+        )
         self.runtime.parent_queue.put(request, timeout=5)
         logger.info(
             f"[{self.edge_id}] Parent model submitted: parent_round={parent_round}"
+        )
+        self.event_logger.emit(
+            "parent_fit_start", global_round=global_round, parent_round=parent_round
         )
 
         started = time.monotonic()
@@ -319,6 +341,7 @@ class EdgeNode(fl.client.NumPyClient):
                 f"{parent_round}/{expected_child_round}, got "
                 f"{result.parent_round}/{result.child_round}"
             )
+        wait_s = time.monotonic() - started
         validate_parameters(self.model, result.parameters)
         final_parameters = copy_parameters(result.parameters)
         set_parameters(self.model, final_parameters)
@@ -334,8 +357,21 @@ class EdgeNode(fl.client.NumPyClient):
             f"child_round={result.child_round}, clients={self.expected_clients}, "
             f"reported_examples={reported_examples}"
         )
+        self.event_logger.emit(
+            "parent_fit_end",
+            global_round=global_round,
+            parent_round=parent_round,
+            child_round=result.child_round,
+            wait_s=round(wait_s, 3),
+            duration_s=round(time.monotonic() - started, 3),
+            loss=float(loss),
+            accuracy=float(accuracy),
+            reported_examples=reported_examples,
+        )
         return final_parameters, reported_examples, {
             "edge_id": self.edge_id,
+            "client_id": self.edge_id,
+            "global_round": global_round,
             "parent_round": parent_round,
             "child_round": result.child_round,
             "loss": float(loss),

@@ -11,3 +11,5 @@ runs/
 .pytest_cache/
 artifacts/
 config/jetson-7node/ssh-inventory.local.psd1
+logs/
+collected/

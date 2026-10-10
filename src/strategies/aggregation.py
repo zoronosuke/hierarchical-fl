@@ -17,9 +17,21 @@ from flwr.common import (
 )
 from flwr.server.client_proxy import ClientProxy
 
+from src.utils.events import EventLogger
 from src.utils.logger import get_logger
 
 logger = get_logger("strategy")
+
+
+def participant_ids(results: list[tuple[ClientProxy, FitRes]]) -> list[str]:
+    """FitRes.metrics から参加クライアント ID (client_id / edge_id) を集める。"""
+    ids = []
+    for _, fit_res in results:
+        metrics = fit_res.metrics or {}
+        client_id = metrics.get("client_id") or metrics.get("edge_id")
+        if client_id is not None:
+            ids.append(str(client_id))
+    return sorted(ids)
 
 
 # =========================================================================
@@ -79,6 +91,7 @@ class WeightedFedAvg(fl.server.strategy.FedAvg):
         strategy_params: dict[str, Any] | None = None,
         initial_parameters: Parameters | None = None,
         evaluate_fn=None,
+        event_logger: EventLogger | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -87,6 +100,11 @@ class WeightedFedAvg(fl.server.strategy.FedAvg):
             **kwargs,
         )
         self._strategy_params = strategy_params or {}
+        self.event_logger = event_logger or EventLogger(None)
+
+    def _round_fields(self, server_round: int) -> dict[str, int]:
+        """イベント記録用のラウンド番号。sub-server は child_round も付ける。"""
+        return {"global_round": server_round, "parent_round": server_round}
 
     def aggregate_fit(
         self,
@@ -106,6 +124,14 @@ class WeightedFedAvg(fl.server.strategy.FedAvg):
         logger.info(
             f"Round {server_round}: Aggregating {len(results)} results "
             f"({total_examples} total examples, {len(failures)} failures)"
+        )
+        self.event_logger.emit(
+            "aggregate",
+            **self._round_fields(server_round),
+            results=len(results),
+            failures=len(failures),
+            total_examples=total_examples,
+            participants=participant_ids(results),
         )
         if self.min_fit_clients > 0 and len(results) < self.min_fit_clients:
             raise RuntimeError(

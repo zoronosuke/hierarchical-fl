@@ -7,6 +7,7 @@ Leaf Client と Edge Internal Client の両方がこのクラスを使用する�
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import flwr as fl
@@ -16,6 +17,7 @@ from src.core.training import evaluate_model, train_one_epoch
 from src.data.loader import create_dummy_dataloader, load_partition
 from src.models.nets import create_model, get_parameters, set_parameters
 from src.utils.config import resolve_device
+from src.utils.events import EventLogger
 from src.utils.logger import get_logger
 
 logger = get_logger("client")
@@ -39,11 +41,13 @@ class HFLClient(fl.client.NumPyClient):
         dry_run: bool = False,
         dry_run_config: dict[str, Any] | None = None,
         contribution_factor: float = 1.0,
+        event_logger: EventLogger | None = None,
     ) -> None:
         self.client_id = client_id
         self.device = resolve_device(device)
         self.dry_run = dry_run
         self.contribution_factor = contribution_factor
+        self.event_logger = event_logger or EventLogger(None)
 
         # 学習ハイパーパラメータ
         tc = training_config or {}
@@ -106,6 +110,17 @@ class HFLClient(fl.client.NumPyClient):
         self, parameters: NDArrays, config: dict[str, Scalar]
     ) -> tuple[NDArrays, int, dict[str, Scalar]]:
         """ローカル学習を行い、パラメータと件数を返す。"""
+        parent_round = config.get("parent_round", 0)
+        child_round = config.get("child_round", 0)
+        global_round = config.get("global_round", parent_round)
+        started = time.monotonic()
+        self.event_logger.emit(
+            "fit_start",
+            client_id=self.client_id,
+            global_round=global_round,
+            parent_round=parent_round,
+            child_round=child_round,
+        )
         set_parameters(self.model, parameters)
 
         total_examples = 0
@@ -140,10 +155,22 @@ class HFLClient(fl.client.NumPyClient):
 
         logger.info(
             f"[{self.client_id}] fit complete: "
-            f"parent_round={config.get('parent_round', 0)}, "
-            f"child_round={config.get('child_round', 0)}, "
+            f"parent_round={parent_round}, "
+            f"child_round={child_round}, "
             f"loss={avg_loss:.4f}, accuracy={accuracy:.4f}, "
             f"examples={total_examples}, reported={reported_examples}"
+        )
+        self.event_logger.emit(
+            "fit_end",
+            client_id=self.client_id,
+            global_round=global_round,
+            parent_round=parent_round,
+            child_round=child_round,
+            duration_s=round(time.monotonic() - started, 3),
+            loss=float(avg_loss),
+            accuracy=float(accuracy),
+            examples=total_examples,
+            reported_examples=reported_examples,
         )
 
         return (

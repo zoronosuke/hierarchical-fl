@@ -1,0 +1,2 @@
+# Jetson (Linux) で実行するシェルスクリプトは常に LF
+*.sh text eol=lf

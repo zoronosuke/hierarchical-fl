@@ -70,7 +70,9 @@ def test_5tier_configs():
     repository = Path(__file__).resolve().parents[1]
     for config_dir, global_file in (
         ("config/jetson-5tier", "config/jetson-5tier/global.yaml"),
+        ("config/jetson-5tier-longrun", "config/jetson-5tier-longrun/global.yaml"),
         ("config/local-5tier", "config/global.yaml"),
+        ("config/local-5tier", "config/local-5tier/global_longrun.yaml"),
     ):
         global_config = load_yaml(repository / global_file)
         topology = load_yaml(repository / config_dir / "topology.yaml")
@@ -103,10 +105,28 @@ def test_5tier_configs():
                 parent_timeout = configs[parent]["sub_round_timeout"]
                 assert ec["parent_round_timeout"] == parent_timeout
             assert parent_timeout > ec["parent_result_timeout"]
+            # 次の親モデルは Global が他の子を round_timeout まで待った後に届きうる
+            assert ec["parent_model_timeout"] > parent_timeout
+            assert ec["parent_model_timeout"] > global_config["server"]["round_timeout"]
 
         assignments = topology["data_partition"]["assignments"]
         assert sorted(assignments.values()) == list(range(6))
         assert topology["data_partition"]["total_partitions"] == 6
+
+
+def test_longrun_profile():
+    """長時間実験プロファイルは実質無限ラウンド + 時間上限で止まる設定になっている。"""
+    from src.utils.config import load_yaml
+
+    repository = Path(__file__).resolve().parents[1]
+    global_config = load_yaml(repository / "config/jetson-5tier-longrun/global.yaml")
+    assert global_config["server"]["num_rounds"] >= 1_000_000
+    assert global_config["server"]["max_duration_hours"] > 0
+    assert global_config["server"]["round_timeout"] >= 600
+    for name in ("edge_01", "edge_02", "leaf_01", "leaf_03"):
+        ec = load_yaml(repository / f"config/jetson-5tier-longrun/{name}.yaml")["edge"]
+        assert ec["shutdown_timeout"] >= 120
+        assert ec["parent_model_timeout"] >= global_config["server"]["round_timeout"] + 600
 
 def test_resolve_device():
     """デバイス解決。"""

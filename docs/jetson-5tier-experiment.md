@@ -56,6 +56,8 @@ L01とL03は**中継ノード**です。上位サーバーのクライアント�
 
 中継ノードの設定にある`parent_round_timeout`は直上Edgeの`sub_round_timeout`と同じ値にします。`sub_rounds`を2以上に変える場合は、子孫の`upstream_sub_rounds`を祖先Edgeの`sub_rounds`の積に変更してください。
 
+`parent_model_timeout`（次の親モデルを待つ上限）は、直上サーバーが他の子を`round_timeout`まで待った後に親モデルが届く場合に備えて、Globalの`round_timeout`より大きくします（全ノード4800秒）。この条件も起動時に検証されます。
+
 ## 3. ファイアウォール
 
 UFWが有効な場合だけ、各待受ポートを許可します。
@@ -196,6 +198,8 @@ set -o pipefail
 .\scripts\start_jetsons_5tier.ps1 -IdentityFile "C:\Users\iamzo\.ssh\id_ed25519" -DryRun
 .\scripts\start_jetsons_5tier.ps1 -IdentityFile "C:\Users\iamzo\.ssh\id_ed25519"
 ```
+
+Jetson上（または PC の Git Bash）から同じ構成を1コマンドで起動・停止・監視するには `scripts/hfl.sh --profile config/jetson-5tier` を使います。使い方は [長時間実験手順](jetson-longrun-experiment.md) を参照してください。
 
 ## 8. 1PCでの疎通確認
 

@@ -786,6 +786,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+analysis = [
+    { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "matplotlib", version = "3.11.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
 dev = [
     { name = "pytest" },
     { name = "ruff" },
@@ -795,6 +799,7 @@ dev = [
 requires-dist = [
     { name = "flwr", specifier = ">=1.13.0,<2.0.0" },
     { name = "flwr-datasets", extras = ["vision"], specifier = ">=0.5.0" },
+    { name = "matplotlib", marker = "extra == 'analysis'", specifier = ">=3.7" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pyyaml", specifier = ">=6.0" },
@@ -805,7 +810,7 @@ requires-dist = [
     { name = "torchvision", marker = "platform_machine != 'aarch64'", specifier = ">=0.15.0" },
     { name = "torchvision", marker = "platform_machine == 'aarch64'", specifier = ">=0.15.0", index = "https://pypi.jetson-ai-lab.io/jp6/cu126" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "analysis"]
 
 [[package]]
 name = "httpcore"

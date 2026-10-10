@@ -27,6 +27,9 @@ uv run python run.py --dry-run             # 疎通確認 (1PC上で全プロセ
 uv run python run.py                       # 本番学習
 uv run pytest tests/ -v                    # テスト実行
 uv run ruff check src/                     # lint
+scripts/hfl.sh start|stop|status [NUM]     # Jetson 上で自ノードの役割を1コマンド起動/停止
+scripts/hfl.sh start-all|stop-all|status-all|collect|monitor start   # .201 や PC から7台一括
+uv run python scripts/plot_run.py collected/<run-id>   # 回収した events.jsonl を CSV + PNG に
 ```
 
 ## Architecture (IMPORTANT)
@@ -36,6 +39,9 @@ uv run ruff check src/                     # lint
 - Edgeは入れ子にできる (上位Edgeのsub-serverへ接続する中継ノード)。5段構成は`config/jetson-5tier/`と`docs/jetson-5tier-experiment.md`
 - `start_server` / `start_client` は deprecated だが、入れ子構造では新 API が未対応のため使用
 - `uv.lock`の検証済みFlower版とlegacy APIを使用する
+- Global と sub-server は `StoppableServer` (src/core/stoppable_server.py) で動き、時間上限 (`--max-hours` / `server.max_duration_hours`)・停止ファイル (`HFL_STOP_FILE`)・親の切断でラウンド境界停止 → 配下へ正常な切断通知が連鎖する。シグナルは Flower が握るので使わない
+- 各プロセスは `HFL_EVENT_LOG` が設定されていれば JSONL イベント (src/utils/events.py) を追記する。未設定なら no-op
+- 長時間実験の運用は docs/jetson-longrun-experiment.md と scripts/hfl.sh (台帳: config/<profile>/nodes.yaml)
 
 ## Conventions
 - 設定はすべて YAML (config/ 配下)。ハードコーディング禁止

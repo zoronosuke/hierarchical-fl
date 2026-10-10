@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HFL Monitor</title>
+<!-- 単一ファイル・外部依存なし (実験 LAN にはインターネットがない)。status.json を定期取得して描く。 -->
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+    --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #4a3aa7; --s8: #e34948;
+    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+      --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1280px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: var(--ink-2); font-size: 13px; margin-bottom: 12px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .tile .label { color: var(--ink-2); font-size: 12px; }
+  .tile .value { font-size: 26px; font-weight: 600; line-height: 1.2; }
+  .tile .value small { font-size: 13px; font-weight: 400; color: var(--muted); }
+  .alerts { margin: 0 0 12px; padding: 0; list-style: none; }
+  .alerts li { background: var(--surface); border-left: 4px solid var(--critical); border-radius: 6px; padding: 6px 10px; margin-bottom: 4px; font-size: 13px; }
+  .alerts li.warn { border-left-color: var(--warning); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+  .card h2 { font-size: 14px; margin: 0 0 8px; color: var(--ink-2); font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 13px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.num, th.num { text-align: right; }
+  .state { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .st-running .dot { background: var(--good); } .st-finished .dot { background: var(--s1); }
+  .st-stale .dot { background: var(--warning); } .st-stopped .dot, .st-not_started .dot { background: var(--muted); }
+  .st-failed .dot, .st-error .dot, .st-unreachable .dot, .st-no_repo .dot { background: var(--critical); }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; vertical-align: -1px; margin-right: 6px; }
+  .charts { display: grid; grid-template-columns: 1fr; gap: 12px; }
+  @media (min-width: 900px) { .charts.two { grid-template-columns: 1fr 1fr; } }
+  canvas { width: 100%; height: 240px; display: block; touch-action: none; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--ink-2); margin-top: 6px; }
+  .tooltip { position: fixed; pointer-events: none; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.15); display: none; z-index: 10; }
+  details summary { cursor: pointer; color: var(--ink-2); font-size: 12px; }
+  .tail { font: 11px/1.4 ui-monospace, Consolas, monospace; color: var(--ink-2); white-space: pre-wrap; margin: 0; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>HFL Monitor <span id="run" class="muted"></span></h1>
+  <div class="sub" id="meta">status.json を読み込み中…</div>
+
+  <div class="tiles">
+    <div class="tile"><div class="label">生存ノード</div><div class="value" id="t-alive">–</div></div>
+    <div class="tile"><div class="label">Global ラウンド</div><div class="value" id="t-round">–</div></div>
+    <div class="tile"><div class="label">Global accuracy</div><div class="value" id="t-acc">–</div></div>
+    <div class="tile"><div class="label">Global loss</div><div class="value" id="t-loss">–</div></div>
+    <div class="tile"><div class="label">Global 稼働時間</div><div class="value" id="t-up">–</div></div>
+    <div class="tile"><div class="label">ラウンド所要 (中央値)</div><div class="value" id="t-rs">–</div></div>
+  </div>
+
+  <ul class="alerts" id="alerts"></ul>
+
+  <div class="card">
+    <h2>ノード</h2>
+    <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>NUM</th><th>ID</th><th>役割</th><th>状態</th><th class="num">PID</th><th class="num">稼働</th><th class="num">RSS</th>
+        <th>ポート</th><th class="num">ラウンド</th><th class="num">loss</th><th class="num">acc</th><th class="num">最終更新</th><th class="num">時計ずれ</th><th class="num">TB</th><th>最終イベント</th>
+      </tr></thead>
+      <tbody id="nodes"></tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="charts two">
+    <div class="card"><h2>Global accuracy（時刻）</h2><canvas id="c-acc"></canvas></div>
+    <div class="card"><h2>Global loss（時刻）</h2><canvas id="c-loss"></canvas></div>
+  </div>
+  <div class="card">
+    <h2>各ノードの Global ラウンド進行（時刻）</h2>
+    <canvas id="c-rounds" style="height:300px"></canvas>
+    <div class="legend" id="legend-rounds"></div>
+  </div>
+  <div class="card">
+    <details><summary>Global 評価の表（直近 50 ラウンド）</summary>
+      <table><thead><tr><th>時刻</th><th class="num">round</th><th class="num">loss</th><th class="num">accuracy</th><th class="num">所要 s</th></tr></thead>
+      <tbody id="evals"></tbody></table>
+    </details>
+  </div>
+  <div class="card">
+    <details><summary>各ノードのログ末尾</summary><div id="tails"></div></details>
+  </div>
+</main>
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+(() => {
+  const SERIES = ['--s1','--s2','--s3','--s4','--s5','--s6','--s7','--s8'];
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const STATE_LABEL = { running: '稼働中', finished: '正常終了', stale: '更新停止', stopped: '停止', not_started: '未起動',
+                        failed: '異常終了', error: 'エラー', unreachable: '到達不能', no_repo: '配備なし' };
+  const STATE_ICON = { running: '●', finished: '✓', stale: '…', stopped: '■', not_started: '○', failed: '✗', error: '✗', unreachable: '✗', no_repo: '✗' };
+  const tooltip = document.getElementById('tooltip');
+  const fmtTime = (t) => new Date(t * 1000).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+  const fmtDateTime = (t) => new Date(t * 1000).toLocaleString('ja-JP', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const fmtDur = (s) => { if (s == null) return '–'; const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m${Math.floor(s % 60)}s`; };
+  const fmt = (v, d = 3) => (v == null ? '–' : Number(v).toFixed(d));
+
+  // ---- 折れ線チャート (1軸・2px 線・端点マーカー・ホバー十字線) ----
+  function drawLines(canvas, series, opts) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    canvas.width = w * dpr; canvas.height = h * dpr;
+    const ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr);
+    const pad = { l: 48, r: 16, t: 12, b: 28 };
+    const pts = series.flatMap(s => s.points);
+    if (!pts.length) { ctx.fillStyle = css('--muted'); ctx.font = '13px system-ui'; ctx.fillText('データ待ち', pad.l, h / 2); canvas._hit = null; return; }
+    const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+    let x0 = Math.min(...xs), x1 = Math.max(...xs); if (x1 === x0) x1 = x0 + 60;
+    let y0 = opts.yMin != null ? opts.yMin : Math.min(...ys), y1 = opts.yMax != null ? opts.yMax : Math.max(...ys);
+    if (y1 === y0) { y1 = y0 + 1; }
+    if (opts.yMin == null) { const m = (y1 - y0) * 0.08; y0 -= m; y1 += m; if (opts.zero) y0 = Math.min(0, y0); }
+    const X = t => pad.l + (t - x0) / (x1 - x0) * (w - pad.l - pad.r);
+    const Y = v => h - pad.b - (v - y0) / (y1 - y0) * (h - pad.t - pad.b);
+    // grid + ticks
+    ctx.strokeStyle = css('--grid'); ctx.lineWidth = 1; ctx.fillStyle = css('--muted'); ctx.font = '11px system-ui';
+    const ny = 4;
+    for (let i = 0; i <= ny; i++) {
+      const v = y0 + (y1 - y0) * i / ny, y = Math.round(Y(v)) + 0.5;
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+      ctx.textAlign = 'right'; ctx.fillText(opts.yFmt ? opts.yFmt(v) : v.toFixed(2), pad.l - 6, y + 4);
+    }
+    const nx = Math.max(2, Math.floor((w - pad.l - pad.r) / 90));
+    ctx.textAlign = 'center';
+    for (let i = 0; i <= nx; i++) { const t = x0 + (x1 - x0) * i / nx; ctx.fillText(fmtTime(t), X(t), h - pad.b + 16); }
+    ctx.strokeStyle = css('--axis'); ctx.beginPath(); ctx.moveTo(pad.l, h - pad.b + 0.5); ctx.lineTo(w - pad.r, h - pad.b + 0.5); ctx.stroke();
+    // lines
+    series.forEach(s => {
+      if (!s.points.length) return;
+      ctx.strokeStyle = s.color; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      ctx.beginPath();
+      s.points.forEach((p, i) => { const x = X(p[0]), y = Y(p[1]); if (i === 0) ctx.moveTo(x, y); else if (opts.step) { ctx.lineTo(x, Y(s.points[i - 1][1])); ctx.lineTo(x, y); } else ctx.lineTo(x, y); });
+      ctx.stroke();
+      const last = s.points[s.points.length - 1];
+      ctx.beginPath(); ctx.arc(X(last[0]), Y(last[1]), 6, 0, Math.PI * 2); ctx.fillStyle = css('--surface'); ctx.fill();
+      ctx.beginPath(); ctx.arc(X(last[0]), Y(last[1]), 4, 0, Math.PI * 2); ctx.fillStyle = s.color; ctx.fill();
+      if (opts.endLabel) { ctx.fillStyle = css('--ink-2'); ctx.font = '11px system-ui'; ctx.textAlign = 'left'; ctx.fillText(s.name, Math.min(X(last[0]) + 8, w - pad.r - 40), Y(last[1]) + 4); }
+    });
+    canvas._hit = { X, Y, x0, x1, series, pad, w, h };
+  }
+  function attachHover(canvas, format) {
+    canvas.addEventListener('pointermove', (e) => {
+      const hit = canvas._hit; if (!hit) return;
+      const rect = canvas.getBoundingClientRect(); const px = e.clientX - rect.left;
+      const t = hit.x0 + (px - hit.pad.l) / (hit.w - hit.pad.l - hit.pad.r) * (hit.x1 - hit.x0);
+      const rows = [];
+      hit.series.forEach(s => {
+        if (!s.points.length) return;
+        let best = s.points[0]; for (const p of s.points) { if (Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p; }
+        rows.push(`<span class="swatch" style="background:${s.color}"></span>${s.name}: ${format(best)}`);
+      });
+      tooltip.innerHTML = `<div class="muted">${fmtDateTime(t)}</div>` + rows.join('<br>');
+      tooltip.style.display = 'block'; tooltip.style.left = (e.clientX + 12) + 'px'; tooltip.style.top = (e.clientY + 12) + 'px';
+    });
+    canvas.addEventListener('pointerleave', () => { tooltip.style.display = 'none'; });
+  }
+  attachHover(document.getElementById('c-acc'), p => `accuracy ${fmt(p[1])} (round ${p[2]})`);
+  attachHover(document.getElementById('c-loss'), p => `loss ${fmt(p[1])} (round ${p[2]})`);
+  attachHover(document.getElementById('c-rounds'), p => `round ${p[1]}`);
+
+  let lastStatus = null;
+  function render(st) {
+    lastStatus = st;
+    const s = st.summary || {};
+    document.getElementById('run').textContent = st.run_id || '';
+    const age = Math.round(Date.now() / 1000 - st.t);
+    document.getElementById('meta').textContent = `更新 ${st.generated_at}（${age}s 前） · ${st.profile} · ${st.interval_s}s 間隔 · 監視ホスト ${st.monitor_host || ''}`;
+    document.getElementById('t-alive').innerHTML = `${s.alive ?? '–'}<small> / ${s.total ?? '–'}</small>`;
+    document.getElementById('t-round').textContent = s.global_round ?? '–';
+    document.getElementById('t-acc').textContent = fmt(s.last_accuracy, 4);
+    document.getElementById('t-loss').textContent = fmt(s.last_loss, 4);
+    document.getElementById('t-up').textContent = fmtDur(s.global_uptime_s);
+    document.getElementById('t-rs').innerHTML = s.expected_round_s != null ? `${s.expected_round_s}<small> s</small>` : '–';
+    const alerts = document.getElementById('alerts'); alerts.innerHTML = '';
+    (st.alerts || []).forEach(a => { const li = document.createElement('li'); li.textContent = '⚠ ' + a; if (/時計ずれ|更新されて/.test(a)) li.className = 'warn'; alerts.appendChild(li); });
+    const tbody = document.getElementById('nodes'); tbody.innerHTML = '';
+    const tails = document.getElementById('tails'); tails.innerHTML = '';
+    (st.nodes || []).forEach((n, i) => {
+      const tr = document.createElement('tr');
+      const port = n.port_listening == null ? '–' : (n.port_listening ? `${n.port} 待受` : `${n.port} 閉`);
+      const le = n.last_event ? `${n.last_event.proc || ''}/${n.last_event.event}${n.last_event.reason ? ' (' + n.last_event.reason + ')' : ''}` : '–';
+      tr.innerHTML = `<td><span class="swatch" style="background:${css(SERIES[i % 8])}"></span>${n.num}</td><td>${n.id}</td><td>${n.role}</td>`
+        + `<td><span class="state st-${n.state}"><span class="dot"></span>${STATE_ICON[n.state] || ''} ${STATE_LABEL[n.state] || n.state}${n.exit_code != null ? ' (exit ' + n.exit_code + ')' : ''}</span></td>`
+        + `<td class="num">${n.pid ?? '–'}</td><td class="num">${fmtDur(n.uptime_s)}</td><td class="num">${n.rss_mb != null ? n.rss_mb + ' MB' : '–'}</td>`
+        + `<td>${port}</td><td class="num">${n.current_round ?? '–'}</td><td class="num">${fmt(n.last_loss)}</td><td class="num">${fmt(n.last_accuracy)}</td>`
+        + `<td class="num">${n.last_event_age_s != null ? Math.round(n.last_event_age_s) + ' s' : '–'}</td>`
+        + `<td class="num">${n.clock_offset_s != null ? (n.clock_offset_s > 0 ? '+' : '') + n.clock_offset_s.toFixed(1) + ' s' : '–'}</td>`
+        + `<td class="num">${n.traceback_count}</td><td>${le}</td>`;
+      tbody.appendChild(tr);
+      const pre = document.createElement('pre'); pre.className = 'tail';
+      pre.textContent = `--- ${n.num} ${n.id}\n` + ((n.log_tail && n.log_tail.length) ? n.log_tail.join('\n') : '(なし)');
+      tails.appendChild(pre);
+    });
+    const gs = st.global_series || [];
+    drawLines(document.getElementById('c-acc'), [{ name: 'accuracy', color: css('--s1'), points: gs.filter(p => p.accuracy != null).map(p => [p.t, p.accuracy, p.round]) }], { yMin: 0, yMax: 1, yFmt: v => v.toFixed(1) });
+    drawLines(document.getElementById('c-loss'), [{ name: 'loss', color: css('--s1'), points: gs.filter(p => p.loss != null).map(p => [p.t, p.loss, p.round]) }], { zero: true });
+    const rs = st.round_series || {};
+    const series = (st.nodes || []).map((n, i) => ({ name: `${n.num} ${n.id}`, color: css(SERIES[i % 8]), points: (rs[String(n.num)] || []).map(p => [p[0], p[1]]) }));
+    drawLines(document.getElementById('c-rounds'), series, { step: true, zero: true, yFmt: v => Math.round(v).toLocaleString(), endLabel: false });
+    const legend = document.getElementById('legend-rounds'); legend.innerHTML = '';
+    series.forEach(s => { const el = document.createElement('span'); el.innerHTML = `<span class="swatch" style="background:${s.color}"></span>${s.name}`; legend.appendChild(el); });
+    const evals = document.getElementById('evals'); evals.innerHTML = '';
+    gs.slice(-50).reverse().forEach(p => { const tr = document.createElement('tr'); tr.innerHTML = `<td>${fmtDateTime(p.t)}</td><td class="num">${p.round}</td><td class="num">${fmt(p.loss, 4)}</td><td class="num">${fmt(p.accuracy, 4)}</td><td class="num">${fmt(p.round_duration_s, 1)}</td>`; evals.appendChild(tr); });
+  }
+  async function refresh() {
+    try {
+      const res = await fetch('status.json?_=' + Date.now(), { cache: 'no-store' });
+      if (!res.ok) throw new Error(res.status);
+      render(await res.json());
+    } catch (e) {
+      document.getElementById('meta').textContent = 'status.json を読めません: ' + e + (lastStatus ? '（前回の表示を保持）' : '');
+    }
+  }
+  refresh(); setInterval(refresh, 10000);
+  window.addEventListener('resize', () => { if (lastStatus) render(lastStatus); });
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (lastStatus) render(lastStatus); });
+})();
+</script>
+</body>
+</html>
