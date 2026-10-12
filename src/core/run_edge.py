@@ -18,8 +18,11 @@ from src.core.edge_node import EdgeNode, EdgeRuntime
 from src.utils.config import load_yaml
 from src.utils.events import get_event_logger
 from src.utils.logger import get_logger
+from src.utils.net import wait_for_port
 
 logger = get_logger("run_edge")
+
+PORT_WAIT_TIMEOUT = 600.0  # 直上サーバーの待受を待つ上限秒数
 
 
 def main() -> None:
@@ -63,6 +66,8 @@ def main() -> None:
                 event_logger=event_logger,
             )
 
+            # 親との接続にはリトライが無い (gRPC-bidi では max_retries が効かない) ので待受を待つ
+            wait_for_port(global_addr, timeout=PORT_WAIT_TIMEOUT)
             logger.info(f"Connecting to Global Server at {global_addr}...")
             fl.client.start_client(
                 server_address=global_addr,

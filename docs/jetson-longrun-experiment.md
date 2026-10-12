@@ -86,7 +86,8 @@ scripts/hfl.sh start-all --run-id longrun-20261011-01 --max-hours 240
 ```
 
 親の待受を `ss -ltn` で確認してから子を起動する（PowerShell 版と同じ順序）。起動前に全台の既存プロセス・データセットキャッシュ・時計ずれを確認する。
-疎通確認だけなら `--dry-run` を付ける（dummy データで2ラウンド…ではなく、`global_longrun` 同様に時間上限まで回るので `--max-hours 0.05` を併用する）。
+疎通確認だけなら `--dry-run` を付ける（dummy データで2ラウンド回って自動終了）。
+PC の Git Bash から実行する場合は `--identity "C:/Users/iamzo/.ssh/id_ed25519"` を付ける（または `export HFL_SSH_KEY=...`）。
 
 ## 5. 監視
 
@@ -162,7 +163,7 @@ uv run python scripts/plot_run.py collected/longrun-20261011-01
 ```bash
 uv run python run.py --dry-run --topology-config config/local-5tier/topology.yaml          # 2ラウンド疎通
 uv run python run.py --dry-run --global-config config/local-5tier/global_longrun.yaml \
-    --topology-config config/local-5tier/topology.yaml --run-id local-maxhours            # 72秒で時間上限停止
+    --topology-config config/local-5tier/topology.yaml --run-id local-maxhours            # 108秒で時間上限停止
 uv run python scripts/plot_run.py logs/local-maxhours
 ```
 

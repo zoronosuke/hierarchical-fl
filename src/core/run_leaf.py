@@ -19,11 +19,13 @@ from src.core.client import HFLClient
 from src.utils.config import load_yaml
 from src.utils.events import get_event_logger
 from src.utils.logger import get_logger
+from src.utils.net import install_grpc_noise_filter, wait_for_port
 
 logger = get_logger("run_leaf")
 
 MAX_RETRIES = 10
 RETRY_INTERVAL = 5  # 秒
+PORT_WAIT_TIMEOUT = 600.0  # Edge の待受を待つ上限秒数
 
 
 def main() -> None:
@@ -78,7 +80,9 @@ def main() -> None:
             event_logger=event_logger,
         )
 
-        # Edge sub-server の起動を待ってからリトライ付きで接続
+        # Edge sub-server の待受を待ってから接続する (UNAVAILABLE 時はさらにリトライ)
+        install_grpc_noise_filter()
+        wait_for_port(args.edge_address, timeout=PORT_WAIT_TIMEOUT)
         for attempt in range(1, MAX_RETRIES + 1):
             logger.info(
                 f"Connecting to Edge Server at {args.edge_address}... "

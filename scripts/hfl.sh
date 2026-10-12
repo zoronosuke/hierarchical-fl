@@ -150,6 +150,13 @@ current_run_id() {
 
 pid_alive() { [[ -n "$1" ]] && kill -0 "$1" 2>/dev/null; }
 
+# 監視ページの URL 表示用。Linux は hostname -I、Git Bash (Windows) は localhost
+local_ip() {
+    local ip
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    echo "${ip:-localhost}"
+}
+
 read_pid() {  # read_pid NUM -> pid or ""
     local pidfile="logs/$RUN_ID/hfl-$1.pid"
     [[ -f "$pidfile" ]] && cat "$pidfile" || true
@@ -353,7 +360,7 @@ cmd_start_all() {
     done
     log "all nodes launched. run_id=$RUN_ID"
     log "logs/events: $HFL_REMOTE_DIR/logs/$RUN_ID/ on each node"
-    log "next: scripts/hfl.sh monitor start --run-id $RUN_ID   (http://$(hostname -I 2>/dev/null | awk '{print $1}'):$HFL_MONITOR_PORT/)"
+    log "next: scripts/hfl.sh monitor start --run-id $RUN_ID   (http://$(local_ip):$HFL_MONITOR_PORT/)"
 }
 
 any_alive() {  # 1つでも動いていれば 0
@@ -452,7 +459,7 @@ cmd_monitor() {
             echo $! > "$pidfile"
             sleep 2
             pid_alive "$(cat "$pidfile")" || { tail -n 20 "$logfile" >&2; die "monitor failed to start"; }
-            log "monitor started (pid=$(cat "$pidfile")): http://$(hostname -I 2>/dev/null | awk '{print $1}'):$HFL_MONITOR_PORT/  (log: $logfile)"
+            log "monitor started (pid=$(cat "$pidfile")): http://$(local_ip):$HFL_MONITOR_PORT/  (log: $logfile)"
             ;;
         stop)
             if pid_alive "$pid"; then kill "$pid" && log "monitor stopped"; else log "monitor is not running"; fi

@@ -35,6 +35,7 @@ from src.strategies.aggregation import WeightedFedAvg
 from src.utils.config import resolve_device
 from src.utils.events import get_event_logger
 from src.utils.logger import get_logger
+from src.utils.net import install_grpc_noise_filter, wait_for_port
 
 logger = get_logger("sub_federation")
 
@@ -50,6 +51,9 @@ def _start_client_with_retry(
     retry_interval: float = 1.0,
 ) -> None:
     """起動直後のUNAVAILABLEを許容してFlower Clientを接続する。"""
+    install_grpc_noise_filter()
+    # 先に待受を待てば、通常は UNAVAILABLE → リトライの経路に入らない
+    wait_for_port(server_address, timeout=startup_timeout)
     deadline = time.monotonic() + startup_timeout
     attempt = 0
     while True:

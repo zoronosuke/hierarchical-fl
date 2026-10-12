@@ -60,7 +60,7 @@ def test_persistent_hfl_two_global_rounds():
 
 
 def test_max_hours_stops_all_processes_cleanly(tmp_path):
-    """実質無限ラウンドを時間上限 (0.01 h = 36 s) で止め、全プロセスが正常終了する。"""
+    """実質無限ラウンドを時間上限 (0.03 h = 108 s) で止め、全プロセスが正常終了する。"""
     repository = Path(__file__).resolve().parents[1]
     completed = subprocess.run(
         [
@@ -76,12 +76,12 @@ def test_max_hours_stops_all_processes_cleanly(tmp_path):
             "--log-dir",
             str(tmp_path),
             "--completion-timeout",
-            "240",
+            "300",
         ],
         cwd=repository,
         capture_output=True,
         text=True,
-        timeout=300,
+        timeout=360,
         check=False,
     )
     log = completed.stdout + completed.stderr

@@ -1,7 +1,7 @@
 # =============================================================================
 # 1PC 5段HFL 時間上限スモーク試験: Global Server 設定
 #
-# dry-run で実質無限 (100000 ラウンド) に回し、max_duration_hours (0.02 h = 72 秒)
+# dry-run で実質無限 (100000 ラウンド) に回し、max_duration_hours (0.03 h = 108 秒)
 # で Global がラウンド境界停止 → 全ノードが正常終了することを確認する。
 #   uv run python run.py --dry-run --global-config config/local-5tier/global_longrun.yaml \
 #       --topology-config config/local-5tier/topology.yaml --run-id local-maxhours
@@ -10,7 +10,7 @@
 server:
   address: "0.0.0.0:8080"
   num_rounds: 1000000
-  max_duration_hours: 0.02
+  max_duration_hours: 0.03
   round_timeout: 300.0
   min_fit_clients: 2
   min_available_clients: 2
