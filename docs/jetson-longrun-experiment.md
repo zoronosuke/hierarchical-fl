@@ -179,3 +179,16 @@ uv run python scripts/plot_run.py logs/local-maxhours
 | `stop` しても Global が止まらない | ラウンド境界でしか止まらない。固まっている場合は round_timeout (1500 s) 後に止まる。急ぐなら再度 `stop`（STOP_TIMEOUT 経過後に強制終了） |
 | 監視ページが開けない | `scripts/hfl.sh monitor status`。.201 の UFW で 8000 を開ける: `sudo ufw allow from 192.168.10.0/24 to any port 8000 proto tcp` |
 | 新しい run-id なのに即停止する | 前の `STOP` ファイルが残っている。`start` は同じ run-id の STOP を消すが、別 run-id の場合は無関係 |
+
+## 12. 2026-10-12 の検証結果（a0aa3f4）
+
+PC の Git Bash から `scripts/hfl.sh` で7台を操作し、配備 → dry-run → 6分の本番 → 回収 → 可視化まで一通り確認した。
+
+- **dry-run** (`start-all --dry-run`, run-id `dry-longrun-20261012-01`): 2ラウンドで全7プロセスが exit 0。初回は .202 のログに gRPC 接続監視スレッドの `Traceback`（接続前の UNAVAILABLE リトライ時のノイズ）が1件出たため、親の待受を待ってから接続するよう修正し、この1種類だけ抑制した（a0aa3f4）。
+- **本番** (`start-all --max-hours 0.1`, run-id `short-20261012-01`): Global が 346 秒で 11 ラウンドを回し `reason=max_duration` で停止。全ノード exit 0、`Traceback` 0、`error` イベント 0、終了後の残プロセス 0。停止理由は Global `max_duration`、Edge/中継 `stop_requested`(sub_server)・`finished`(internal_client, edge)、Leaf `finished`。
+- **精度**: round 1 → 11 で accuracy 0.2947 → 0.7288、loss 1.98 → 0.78（CIFAR-10 test 10,000枚）。
+- **所要時間**: 初回ラウンド 158 秒（データ読み込み込み）、2ラウンド目以降は中央値 18.7 秒。fit は Edge/中継 9〜10 秒、Leaf 5.5〜6.5 秒（`fit_duration.png`）。
+- **監視**: PC で `monitor start` → `http://localhost:8000/` で7台の状態と時系列を確認。時計ずれは7台とも PC に対して約 -1.0 秒（`clock-check`）。
+- **回収・可視化**: `collect` で `collected/short-20261012-01/` に7台分（events 508件）、`plot_run.py` で CSV と PNG 6種を生成。生ログと collected/ は git に入れない。
+
+次は同じ手順で `--max-hours` を外し（既定 240 時間）、バッテリー・ソーラー給電で `start-all` する。
