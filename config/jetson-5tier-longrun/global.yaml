@@ -11,6 +11,9 @@ server:
   num_rounds: 1000000
   max_duration_hours: 240       # 10日。--max-hours で上書き可
   round_timeout: 1500.0         # Edge集約完了を最大25分待つ
+  # Global モデルの保存間隔 (ラウンド)。停止時にも保存する。0.75 MB/回なので
+  # microSD の書き込み量を抑えて 5 ラウンド (約1.5分) ごと。再開時に失うのは最大4ラウンド
+  checkpoint_every: 5
   min_fit_clients: 2
   min_available_clients: 2
   fraction_fit: 1.0

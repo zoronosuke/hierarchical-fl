@@ -111,6 +111,11 @@ def main() -> int:
         help="指定すると <log-dir>/<run-id>/events-<name>.jsonl にイベントを記録する",
     )
     parser.add_argument("--log-dir", default="logs")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="--run-id のチェックポイントの続きから Global を再開する",
+    )
     args = parser.parse_args()
 
     global_cfg = load_yaml(args.global_config)
@@ -125,6 +130,10 @@ def main() -> int:
     run_dir = Path(args.log_dir) / args.run_id if args.run_id else None
     if run_dir is not None:
         run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "STOP").unlink(missing_ok=True)  # 前回の停止要求を持ち越さない
+    elif args.resume:
+        parser.error("--resume には --run-id が必要です")
+    resume_flag = ["--resume"] if args.resume else []
     processes: list[ManagedProcess] = []
     interrupted = False
 
@@ -146,6 +155,7 @@ def main() -> int:
                 HFL_NODE_ID=name,
                 HFL_EVENT_LOG=str(run_dir / f"events-{name}.jsonl"),
                 HFL_STOP_FILE=str(run_dir / "STOP"),
+                HFL_CHECKPOINT=str(run_dir / "checkpoint.npz"),
             )
         process = subprocess.Popen(command, env=env)
         managed = ManagedProcess(name, process)
@@ -163,6 +173,7 @@ def main() -> int:
                 args.global_config,
                 *dry_run_flag,
                 *max_hours_flag,
+                *resume_flag,
             ],
         )
         global_address = global_cfg.get("server", {}).get(

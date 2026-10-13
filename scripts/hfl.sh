@@ -19,10 +19,13 @@ RUN_ID="${HFL_RUN_ID:-}"
 NUM=""
 DRY_RUN=0
 MAX_HOURS=""
+RESUME=0
+FORCE=0
 IDENTITY="${HFL_SSH_KEY:-}"
 OUT_DIR=""
 STARTUP_TIMEOUT="${HFL_STARTUP_TIMEOUT:-180}"
 STOP_TIMEOUT="${HFL_STOP_TIMEOUT:-300}"
+RESUME_WAIT="${HFL_RESUME_WAIT:-1800}"   # resume で全ノードの到達を待つ上限秒数
 MONITOR_INTERVAL="${HFL_MONITOR_INTERVAL:-15}"
 LD_PATH_JETSON="/usr/lib/aarch64-linux-gnu/libcudss/12"
 
@@ -32,12 +35,14 @@ Usage: scripts/hfl.sh <command> [NUM] [options]
 
 このノードで実行するコマンド (NUM 省略時は自ホストの IP から判定):
   start   [NUM]   役割 (global / edge / leaf) をバックグラウンドで起動
-  stop    [NUM]   停止 (global はラウンド境界で正常停止 → 配下へ連鎖。他は即時)
+  stop    [NUM]   停止 (global はラウンド境界で正常停止 → 配下へ連鎖。他は即時。--force で即時)
   status  [NUM]   プロセス・待受ポート・最終イベントを表示
 
 全ノードに対して SSH で実行するコマンド (.201 や PC から):
   start-all       親→子の順に全ノードを起動 (親の待受を確認してから子を起動)
   stop-all        Global を正常停止し、連鎖終了を待ってから残りを停止
+  resume          止まった実験を同じ run-id でチェックポイントの続きから再開
+                  (残ったプロセスを片付け → 全ノードの到達を待つ → 親→子の順に起動)
   status-all      全ノードの状態を1表で表示
   wait            Global が終了するまで待つ
   collect         全ノードの logs/<run-id>/ を collected/<run-id>/<NUM>/ に回収
@@ -49,7 +54,9 @@ Options:
   --profile DIR     台帳・設定のディレクトリ (既定: config/jetson-5tier-longrun)
   --run-id ID       実験 ID (既定: start/start-all は日時、他は logs/current_run)
   --dry-run         疎通確認モード (dummy データ・2ラウンド)
-  --max-hours H     Global の時間上限 (YAML の max_duration_hours を上書き)
+  --max-hours H     Global の時間上限 (YAML の max_duration_hours を上書き。再開後も最初の開始から数える)
+  --resume          start / start-all で Global をチェックポイントの続きから起動
+  --force           stop で正常停止を待たずに即時終了
   --identity FILE   SSH 秘密鍵 (環境変数 HFL_SSH_KEY でも可)
   --out DIR         collect の出力先
   --interval SEC    monitor のポーリング間隔 (既定 15)
@@ -75,6 +82,8 @@ while [[ $# -gt 0 ]]; do
         --run-id) RUN_ID="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --max-hours) MAX_HOURS="$2"; shift 2 ;;
+        --resume) RESUME=1; shift ;;
+        --force) FORCE=1; shift ;;
         --identity) IDENTITY="$2"; shift 2 ;;
         --out) OUT_DIR="$2"; shift 2 ;;
         --interval) MONITOR_INTERVAL="$2"; shift 2 ;;
@@ -191,6 +200,7 @@ cmd_start() {
     local cmd_flags=()
     [[ "$DRY_RUN" == 1 ]] && cmd_flags+=(--dry-run)
     [[ -n "$MAX_HOURS" ]] && cmd_flags+=(--max-hours "$MAX_HOURS")
+    [[ "$RESUME" == 1 ]] && cmd_flags+=(--resume)
     local cmd=()
     mapfile -t cmd < <(nodes command "$NUM" "${cmd_flags[@]}")
 
@@ -200,6 +210,7 @@ cmd_start() {
         NO_PROXY="$HFL_NO_PROXY_LIST" no_proxy="$HFL_NO_PROXY_LIST" no_grpc_proxy="$HFL_NO_PROXY_LIST"
         HFL_EVENT_LOG="logs/$RUN_ID/events-$NUM.jsonl"
         HFL_STOP_FILE="logs/$RUN_ID/STOP"
+        HFL_CHECKPOINT="logs/$RUN_ID/checkpoint.npz"
         HFL_RUN_ID="$RUN_ID" HFL_NODE_ID="$NODE_ID" HFL_NODE_NUM="$NUM"
     )
     if [[ -d "$LD_PATH_JETSON" ]]; then
@@ -213,10 +224,12 @@ cmd_start() {
     # .exit に残す。強制終了されたときは .exit が無い = 正常終了ではない証拠になる。
     local launcher=(bash -c 'echo $$ > "$1"; exitfile="$2"; shift 2; "$@"; code=$?; echo $code > "$exitfile"; exit $code'
                     _ "$pidfile" "$exitfile" env "${envs[@]}" "$PY" "${cmd[@]}")
+    # ログは追記する (同じ run-id で再起動・再開しても前のログを消さない)
+    echo "===== [hfl] start $(date '+%Y-%m-%d %H:%M:%S') node=$NUM resume=$RESUME =====" >> "$logfile"
     if command -v setsid >/dev/null 2>&1; then
-        setsid "${launcher[@]}" > "$logfile" 2>&1 < /dev/null &
+        setsid "${launcher[@]}" >> "$logfile" 2>&1 < /dev/null &
     else
-        "${launcher[@]}" > "$logfile" 2>&1 < /dev/null &
+        "${launcher[@]}" >> "$logfile" 2>&1 < /dev/null &
     fi
     sleep 3
     local pid; pid="$(read_pid "$NUM")"
@@ -245,7 +258,7 @@ cmd_stop() {
         log "node $NUM (${NODE_ID[$NUM]}) is not running (run_id=$RUN_ID)"
         return 0
     fi
-    if [[ "${NODE_ROLE[$NUM]}" == "global" ]]; then
+    if [[ "${NODE_ROLE[$NUM]}" == "global" && "$FORCE" != 1 ]]; then
         # 停止ファイル → Global が次のラウンド境界で止まり、配下へ切断通知が連鎖する
         log "global pid=$pid: requesting stop at the next round boundary (logs/$RUN_ID/STOP)"
         touch "logs/$RUN_ID/STOP"
@@ -352,6 +365,7 @@ cmd_start_all() {
     local flags=(--profile "$PROFILE" --run-id "$RUN_ID")
     [[ "$DRY_RUN" == 1 ]] && flags+=(--dry-run)
     [[ -n "$MAX_HOURS" ]] && flags+=(--max-hours "$MAX_HOURS")
+    [[ "$RESUME" == 1 ]] && flags+=(--resume)
     mkdir -p logs; echo "$RUN_ID" > logs/current_run
     for num in $HFL_NODE_NUMS; do
         log "== node $num (${NODE_ROLE[$num]} ${NODE_ID[$num]})"
@@ -370,6 +384,42 @@ any_alive() {  # 1つでも動いていれば 0
         if remote "$num" "$pid_cmd" 2>/dev/null; then return 0; fi
     done
     return 1
+}
+
+global_num() {
+    local num
+    for num in $HFL_NODE_NUMS; do
+        if [[ "${NODE_ROLE[$num]}" == "global" ]]; then echo "$num"; return; fi
+    done
+}
+
+# 止まった実験を、同じ run-id でチェックポイントの続きから再開する
+cmd_resume() {
+    current_run_id
+    local gnum num pending waited=0
+    gnum="$(global_num)"
+    log "resume run_id=$RUN_ID: waiting for all nodes to be reachable (up to ${RESUME_WAIT}s)"
+    while :; do
+        pending=""
+        for num in $HFL_NODE_NUMS; do
+            remote "$num" "true" >/dev/null 2>&1 || pending+=" $num"
+        done
+        [[ -z "$pending" ]] && break
+        (( waited >= RESUME_WAIT )) && die "nodes still unreachable:$pending"
+        log "  unreachable:$pending (waited ${waited}s)"
+        sleep 15; waited=$((waited + 15))
+    done
+    remote "$gnum" "test -f logs/$RUN_ID/checkpoint.npz" \
+        || die "no checkpoint on node $gnum: logs/$RUN_ID/checkpoint.npz"
+
+    log "cleaning up leftover processes of run_id=$RUN_ID"
+    for num in $HFL_NODE_NUMS; do
+        remote_hfl "$num" "stop $num --force --profile $PROFILE --run-id $RUN_ID" | sed 's/^/  /' \
+            || log "node $num: cleanup failed"
+    done
+    log "starting all nodes from the checkpoint"
+    RESUME=1
+    cmd_start_all
 }
 
 cmd_stop_all() {
@@ -478,6 +528,7 @@ case "$COMMAND" in
     status) cmd_status ;;
     start-all) cmd_start_all ;;
     stop-all) cmd_stop_all ;;
+    resume) cmd_resume ;;
     status-all) cmd_status_all ;;
     wait) cmd_wait ;;
     collect) cmd_collect ;;

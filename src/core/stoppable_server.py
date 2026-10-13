@@ -20,6 +20,7 @@ import time
 import timeit
 from typing import Any, Callable
 
+from flwr.common import Parameters
 from flwr.server import History, Server
 from flwr.server.client_manager import ClientManager
 from flwr.server.strategy import Strategy
@@ -54,6 +55,7 @@ class StoppableServer(Server):
         stop_file: str | None = None,
         on_stop: Callable[[str], None] | None = None,
         on_round_start: Callable[[int], None] | None = None,
+        on_round_end: Callable[[int, Parameters], None] | None = None,
     ) -> None:
         super().__init__(client_manager=client_manager, strategy=strategy)
         self.deadline = deadline
@@ -61,7 +63,9 @@ class StoppableServer(Server):
         self.stop_file = stop_file or None
         self.on_stop = on_stop
         self.on_round_start = on_round_start
+        self.on_round_end = on_round_end  # 集約後のパラメータを受け取る (チェックポイント用)
         self.stop_reason: str | None = None
+        self.completed_rounds = 0
 
     def should_stop(self) -> str | None:
         if self.stop_event is not None and self.stop_event.is_set():
@@ -78,7 +82,11 @@ class StoppableServer(Server):
             raise StopRun(reason)
         if self.on_round_start is not None:
             self.on_round_start(server_round)
-        return super().fit_round(server_round, timeout)
+        result = super().fit_round(server_round, timeout)
+        self.completed_rounds = server_round
+        if self.on_round_end is not None and result is not None and result[0] is not None:
+            self.on_round_end(server_round, result[0])
+        return result
 
     def fit(self, num_rounds: int, timeout: float | None) -> tuple[History, float]:
         started = timeit.default_timer()

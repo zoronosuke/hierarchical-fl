@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import queue
 import sys
 import time
@@ -418,12 +417,13 @@ def run_sub_server(
             dry_run=dry_run,
         )
         # 親の接続が終わったら EdgeRuntime.shutdown() が stop_event を立て、
-        # 次の親モデル待ちで StopRun → 子クライアントへ正常な切断通知を送る
+        # 次の親モデル待ちで StopRun → 子クライアントへ正常な切断通知を送る。
+        # 停止ファイルや時間上限は Global だけが見る (sub-server が先に止まると、
+        # Global が始めたラウンドの結果が返らず、round_timeout まで待つことになる)
         server = StoppableServer(
             client_manager=SimpleClientManager(),
             strategy=strategy,
             stop_event=stop_event,
-            stop_file=os.environ.get("HFL_STOP_FILE"),
         )
         fl.server.start_server(
             server_address=ec["sub_server_address"],

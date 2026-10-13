@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -164,3 +165,91 @@ def test_persistent_hfl_5tier_two_global_rounds():
             f"[{edge_id}] Parent generation complete: "
             f"parent_round=2, child_round=2, results={results}"
         ) in log
+
+
+def _events(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    records = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue  # 書き込み途中の最終行
+    return records
+
+
+def _run_until_round(repository: Path, args: list[str], run_dir: Path, until_round: int,
+                     log_path: Path, timeout: float = 300.0) -> int:
+    """run.py を起動し、Global が until_round まで評価したら STOP を作って終了を待つ。"""
+    with open(log_path, "w", encoding="utf-8") as log:
+        process = subprocess.Popen(
+            [sys.executable, "run.py", *args], cwd=repository, stdout=log, stderr=subprocess.STDOUT
+        )
+        deadline = time.monotonic() + timeout
+        try:
+            while time.monotonic() < deadline and process.poll() is None:
+                rounds = [
+                    r.get("global_round", 0)
+                    for r in _events(run_dir / "events-global.jsonl")
+                    if r["event"] == "eval" and not r.get("resumed")
+                ]
+                if rounds and max(rounds) >= until_round:
+                    (run_dir / "STOP").touch()
+                    break
+                time.sleep(1)
+            return process.wait(timeout=max(deadline - time.monotonic(), 30))
+        finally:
+            if process.poll() is None:
+                process.kill()
+
+
+def test_stop_and_resume_from_checkpoint(tmp_path):
+    """停止 → 同じ run-id で --resume → 通しのラウンド番号で続きから学習する。"""
+    repository = Path(__file__).resolve().parents[1]
+    run_dir = tmp_path / "resume"
+    common = [
+        "--dry-run",
+        "--global-config", "config/local-5tier/global_longrun.yaml",
+        "--topology-config", "config/local-5tier/topology.yaml",
+        "--run-id", "resume", "--log-dir", str(tmp_path),
+        "--max-hours", "1",
+    ]
+
+    code = _run_until_round(repository, common, run_dir, 3, tmp_path / "run1.log")
+    log1 = (tmp_path / "run1.log").read_text(encoding="utf-8", errors="replace")
+    assert code == 0, log1
+    stop1 = [r for r in _events(run_dir / "events-global.jsonl") if r["event"] == "stop"]
+    assert stop1 and stop1[-1]["reason"] == "stop_file", stop1
+    first_last = stop1[-1]["global_round"]
+    assert first_last >= 3
+
+    from src.utils.checkpoint import load_checkpoint
+
+    _, meta = load_checkpoint(run_dir / "checkpoint.npz")
+    assert meta["global_round"] == first_last
+
+    code = _run_until_round(
+        repository, [*common, "--resume"], run_dir, first_last + 3, tmp_path / "run2.log"
+    )
+    log2 = (tmp_path / "run2.log").read_text(encoding="utf-8", errors="replace")
+    assert code == 0, log2
+    assert "Traceback" not in log1 + log2
+
+    global_events = _events(run_dir / "events-global.jsonl")
+    resumes = [r for r in global_events if r["event"] == "resume"]
+    assert len(resumes) == 1 and resumes[0]["global_round"] == first_last
+    after = global_events[global_events.index(resumes[0]):]
+    evals = [r["global_round"] for r in after if r["event"] == "eval" and not r.get("resumed")]
+    assert evals[0] == first_last + 1 and evals == sorted(evals)
+    stops = [r for r in after if r["event"] == "stop"]
+    assert stops[-1]["global_round"] >= first_last + 3
+
+    # 下位ノードも通しのラウンド番号で記録される
+    leaf_fits = [
+        r["global_round"] for r in _events(run_dir / "events-leaf_04.jsonl")
+        if r["event"] == "fit_end"
+    ]
+    assert first_last + 1 in leaf_fits and max(leaf_fits) >= first_last + 3
+    for name in ("global", "edge_01", "edge_02", "leaf_01", "leaf_03", "leaf_02", "leaf_04"):
+        assert not [r for r in _events(run_dir / f"events-{name}.jsonl") if r["event"] == "error"]

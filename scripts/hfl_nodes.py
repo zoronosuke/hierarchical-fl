@@ -5,7 +5,7 @@ Jetson 台帳 (config/<profile>/nodes.yaml) を読み、scripts/hfl.sh が使う
 Usage (リポジトリルートで実行):
     python scripts/hfl_nodes.py --profile config/jetson-5tier-longrun list
     python scripts/hfl_nodes.py --profile DIR node 204       # KEY=VALUE 行 (bash の eval 用)
-    python scripts/hfl_nodes.py --profile DIR command 204 [--dry-run] [--max-hours H]
+    python scripts/hfl_nodes.py --profile DIR command 204 [--dry-run] [--max-hours H] [--resume]
     python scripts/hfl_nodes.py --profile DIR self           # 自ホストの IP から num を判定
     python scripts/hfl_nodes.py --profile DIR settings       # 共通設定 (KEY=VALUE 行)
     python scripts/hfl_nodes.py --profile DIR check          # 台帳と YAML の整合性検証
@@ -119,9 +119,14 @@ def load_inventory(profile: str) -> Inventory:
 
 
 def build_command(
-    inventory: Inventory, node: Node, *, dry_run: bool = False, max_hours: float | None = None
+    inventory: Inventory,
+    node: Node,
+    *,
+    dry_run: bool = False,
+    max_hours: float | None = None,
+    resume: bool = False,
 ) -> list[str]:
-    """python に渡す引数列 (-m 以降)。"""
+    """python に渡す引数列 (-m 以降)。--max-hours と --resume は Global だけに付ける。"""
     common = [
         "--global-config", inventory.global_config,
         "--topology-config", inventory.topology_config,
@@ -131,6 +136,8 @@ def build_command(
         args = ["-m", "src.core.global_server", "--config", inventory.global_config]
         if max_hours is not None:
             args += ["--max-hours", str(max_hours)]
+        if resume:
+            args.append("--resume")
     elif node.role == "edge":
         if not node.config:
             raise ValueError(f"edge {node.id}: config_file not found in topology.yaml")
@@ -252,6 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     cmd_parser.add_argument("num", type=int)
     cmd_parser.add_argument("--dry-run", action="store_true")
     cmd_parser.add_argument("--max-hours", type=float, default=None)
+    cmd_parser.add_argument("--resume", action="store_true")
     args = parser.parse_args(argv)
 
     inventory = load_inventory(args.profile)
@@ -296,7 +304,10 @@ def main(argv: list[str] | None = None) -> int:
         print(_shell_assignments("NODE_", asdict(node)))
     elif args.cmd == "command":
         node = inventory.by_num(args.num)
-        for arg in build_command(inventory, node, dry_run=args.dry_run, max_hours=args.max_hours):
+        command = build_command(
+            inventory, node, dry_run=args.dry_run, max_hours=args.max_hours, resume=args.resume
+        )
+        for arg in command:
             print(arg)
     return 0
 

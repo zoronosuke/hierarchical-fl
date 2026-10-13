@@ -19,6 +19,7 @@ from src.utils.config import load_yaml
 from src.utils.events import get_event_logger
 from src.utils.logger import get_logger
 from src.utils.net import wait_for_port
+from src.utils.process import run_main
 
 logger = get_logger("run_edge")
 
@@ -91,4 +92,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

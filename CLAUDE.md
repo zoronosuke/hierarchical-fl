@@ -28,7 +28,7 @@ uv run python run.py                       # 本番学習
 uv run pytest tests/ -v                    # テスト実行
 uv run ruff check src/                     # lint
 scripts/hfl.sh start|stop|status [NUM]     # Jetson 上で自ノードの役割を1コマンド起動/停止
-scripts/hfl.sh start-all|stop-all|status-all|collect|monitor start   # .201 や PC から7台一括
+scripts/hfl.sh start-all|stop-all|status-all|resume|collect|monitor start   # .201 や PC から7台一括
 uv run python scripts/plot_run.py collected/<run-id>   # 回収した events.jsonl を CSV + PNG に
 ```
 
@@ -39,7 +39,9 @@ uv run python scripts/plot_run.py collected/<run-id>   # 回収した events.jso
 - Edgeは入れ子にできる (上位Edgeのsub-serverへ接続する中継ノード)。5段構成は`config/jetson-5tier/`と`docs/jetson-5tier-experiment.md`
 - `start_server` / `start_client` は deprecated だが、入れ子構造では新 API が未対応のため使用
 - `uv.lock`の検証済みFlower版とlegacy APIを使用する
-- Global と sub-server は `StoppableServer` (src/core/stoppable_server.py) で動き、時間上限 (`--max-hours` / `server.max_duration_hours`)・停止ファイル (`HFL_STOP_FILE`)・親の切断でラウンド境界停止 → 配下へ正常な切断通知が連鎖する。シグナルは Flower が握るので使わない
+- Global と sub-server は `StoppableServer` (src/core/stoppable_server.py) で動く。Global は時間上限 (`--max-hours` / `server.max_duration_hours`)・停止ファイル (`HFL_STOP_FILE`) で、sub-server は親の切断 (stop_event) でラウンド境界停止 → 配下へ正常な切断通知が連鎖する。シグナルは Flower が握るので使わない
+- Global は `HFL_CHECKPOINT` に `server.checkpoint_every` ごとモデルを保存し、`--resume` で続きから再開する (global_round は通し番号、parent_round は再開ごとに 1 から)
+- エントリーポイントは `run_main` (src/utils/process.py) で包む。Flower は例外時に gRPC スレッドが残りプロセスが終了しないため
 - 各プロセスは `HFL_EVENT_LOG` が設定されていれば JSONL イベント (src/utils/events.py) を追記する。未設定なら no-op
 - 長時間実験の運用は docs/jetson-longrun-experiment.md と scripts/hfl.sh (台帳: config/<profile>/nodes.yaml)
 

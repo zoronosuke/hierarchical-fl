@@ -101,10 +101,16 @@ class WeightedFedAvg(fl.server.strategy.FedAvg):
         )
         self._strategy_params = strategy_params or {}
         self.event_logger = event_logger or EventLogger(None)
+        # チェックポイントから再開した Global では、Flower のラウンド番号は 1 から数え直し、
+        # 通しのラウンド番号 (global_round) = server_round + この値 になる
+        self.global_round_offset = 0
 
     def _round_fields(self, server_round: int) -> dict[str, int]:
         """イベント記録用のラウンド番号。sub-server は child_round も付ける。"""
-        return {"global_round": server_round, "parent_round": server_round}
+        return {
+            "global_round": server_round + self.global_round_offset,
+            "parent_round": server_round,
+        }
 
     def aggregate_fit(
         self,
