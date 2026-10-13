@@ -91,15 +91,55 @@ PC の Git Bash から実行する場合は `--identity "C:/Users/iamzo/.ssh/id_
 
 ## 5. 監視
 
-```bash
-scripts/hfl.sh monitor start --run-id longrun-20261011-01      # .201 で
-scripts/hfl.sh status-all    --run-id longrun-20261011-01      # 端末に1表
-scripts/hfl.sh wait          --run-id longrun-20261011-01      # Global 終了までブロック
+監視役（`scripts/hfl_monitor.py`）は 15 秒ごとに7台へ SSH し、次を行う。学習のプログラムとは別なので、起動・停止しても学習には影響しない。
+
+- **状態の確認**: プロセス生存、待受ポート、メモリ、終了コード、時計ずれ、Traceback 数
+- **記録のコピー（ミラー）**: 各ノードの `events-<NUM>.jsonl` と `hfl-<NUM>.log` の**増えた分だけ**を手元にコピーする。毎回の転送はノードあたり数 KB。各ノードの元ファイルとあわせて、記録が2か所に残る
+- **電力・温度の記録**: 各 Jetson の電力センサー（INA3221: `VDD_IN` = ボード全体、`VDD_CPU_GPU_CV`、`VDD_SOC`）、温度（cpu / gpu / soc / `tj` = 最高温部）、ファン回転数、メモリ、負荷を `metrics.jsonl` に記録する
+
+グラフはコピーした全記録から作るので、**いつ起動しても実験の最初から**表示される。監視役を止めていた間の記録も、次に起動したときに取り戻す（1回の取り込みは1ファイル 16 MB まで。それを超える分は続けて取り込む）。
+
+出力（監視役を動かしたマシンの `logs/<run-id>/monitor/`）:
+
+| ファイル | 内容 |
+|---|---|
+| `mirror/<NUM>/events-<NUM>.jsonl`, `mirror/<NUM>/hfl-<NUM>.log` | 各ノードの記録のコピー |
+| `metrics.jsonl` | 電力・温度・メモリ（ノードごと・15秒ごとに1行） |
+| `clock_offsets.json` | 各ノードの時計ずれ（`plot_run.py` が補正に使う） |
+| `status.json`, `index.html` | 監視ページ |
+
+### A. Windows PC で動かす（推奨。Jetson の負荷が最小）
+
+PowerShell の窓で、このリポジトリのフォルダに入って実行する。**窓は開いたまま**にする（閉じると監視が止まる。学習は止まらない）。
+
+```powershell
+cd C:\Users\iamzo\Documents\01_School\University\Research\02_Lab\FOWERD\Dev\hierarchical-fl
+uv run python scripts/hfl_monitor.py --profile config/jetson-5tier-longrun --run-id longrun-20261013-01 --identity C:\Users\iamzo\.ssh\id_ed25519
 ```
 
-監視は 15 秒ごとに7台へ SSH し、`logs/<run-id>/monitor/status.json` を更新する。同じディレクトリを HTTP で配信するので、同じ LAN の PC のブラウザで `http://192.168.10.201:8000/` を開く（監視を PC で動かした場合は `http://localhost:8000/`）。
+- ブラウザで `http://localhost:8000/` を開く。止めるときは窓で `Ctrl+C`。
+- 実験中は PC をスリープさせない（設定 → システム → 電源 → スリープ「なし」）。スリープしても、復帰後に止まっていた分は取り戻す。
+- 別の PC からも見る場合は、初回に出る Windows ファイアウォールの許可で「プライベート ネットワーク」を許可し、`http://<このPCのIP>:8000/` を開く。
 
-ページに出るもの: 生存台数、Global ラウンド、accuracy / loss、各ノードの状態（稼働中 / 更新停止 / 停止 / 到達不能）、PID、稼働時間、メモリ、待受ポート、最終イベントからの経過、時計ずれ、Traceback 数、Global accuracy / loss の時系列、各ノードのラウンド進行の時系列、ログ末尾。
+### B. .201 で動かす
+
+```bash
+cd ~/hierarchical-fl-persistent
+scripts/hfl.sh monitor start --run-id longrun-20261013-01     # 停止は monitor stop
+```
+
+ブラウザで `http://192.168.10.201:8000/`。.201 から他の6台へ鍵で SSH できること（§2）。ポート 8000 は1台に1つしか使えないので、前の run-id の監視役は `monitor stop` しておく。
+
+### 端末で状態だけ見る
+
+```bash
+scripts/hfl.sh status-all --run-id longrun-20261013-01     # 1回だけ表示（末尾だけ読む。記録はしない）
+scripts/hfl.sh wait       --run-id longrun-20261013-01     # Global 終了までブロック
+```
+
+### ページに出るもの
+
+実験開始時刻、生存台数、Global ラウンド・accuracy・loss、合計消費電力、停止・再開の回数と停止時間、各ノードの状態（稼働中 / 更新停止 / 停止 / 到達不能）・PID・稼働時間・メモリ・**電力・温度**・待受ポート・最新ラウンド・最終更新・時計ずれ・Traceback 数、グラフ（Global accuracy / loss、各ノードのラウンド進行、**消費電力、温度**。5分以上記録が無い区間は線が切れる）、ログ末尾。tj が 85℃ 以上になると警告を出す。
 
 「サーバが生存を把握できるか」について: Global が直接知るのは直下の Edge 2台だけ。各階層の `aggregate` イベント（誰の結果を集約したか）と各台のプロセス生存を監視が合成して全体像にしている。
 
@@ -125,6 +165,11 @@ uv sync --extra analysis                                       # matplotlib（�
 uv run python scripts/plot_run.py collected/longrun-20261011-01
 ```
 
+監視役を PC で動かしていた場合は、`collect` しなくても監視役のフォルダからそのまま作れる（電力・温度のグラフと消費電力量も出る）。
+```bash
+uv run python scripts/plot_run.py logs/longrun-20261013-01/monitor
+```
+
 出力（`collected/<run-id>/plots/`）:
 
 | ファイル | 内容 |
@@ -136,6 +181,9 @@ uv run python scripts/plot_run.py collected/longrun-20261011-01
 | `participation.png` | ノード × ラウンドの参加マトリクス |
 | `fit_duration.png` | 各クライアントの fit 所要時間。遅い端末の特定に使う |
 | `round_duration.png` | Global ラウンド所要時間 |
+| `power.png` / `temperature.png` | 各ノードの消費電力（VDD_IN）・温度（tj）。監視役の `metrics.jsonl` があるとき |
+| `metrics.csv` | 電力・温度・メモリを1本にしたもの |
+| `summary.json` の `power` | ノードごとの平均・最大電力（W）、消費電力量（Wh）、最高温度。合計消費電力量 |
 
 イベントの形式（JSONL、1行1イベント）。主なフィールド: `ts`（ISO 8601、タイムゾーン付き）、`t`（epoch 秒）、`run_id`、`node`、`node_num`、`host`、`proc`（global / edge / sub_server / internal_client / leaf）、`event`、`global_round`、`parent_round`、`child_round`、`duration_s`、`loss`、`accuracy`、`participants`、`reason`。
 `event` の種類: `start` / `stop` / `error`（全プロセス）、`round_start` / `aggregate` / `eval`（Global と sub-server）、`parent_model_received` / `child_result_sent`（sub-server）、`parent_fit_start` / `parent_fit_end`（Edge）、`fit_start` / `fit_end`（Leaf と Internal）。

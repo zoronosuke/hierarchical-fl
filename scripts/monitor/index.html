@@ -74,6 +74,8 @@
     <div class="tile"><div class="label">Global loss</div><div class="value" id="t-loss">–</div></div>
     <div class="tile"><div class="label">Global 稼働時間</div><div class="value" id="t-up">–</div></div>
     <div class="tile"><div class="label">ラウンド所要 (中央値)</div><div class="value" id="t-rs">–</div></div>
+    <div class="tile"><div class="label">合計消費電力 (VDD_IN)</div><div class="value" id="t-power">–</div></div>
+    <div class="tile"><div class="label">停止・再開</div><div class="value" id="t-resume">–</div></div>
   </div>
 
   <ul class="alerts" id="alerts"></ul>
@@ -84,7 +86,7 @@
     <table>
       <thead><tr>
         <th>NUM</th><th>ID</th><th>役割</th><th>状態</th><th class="num">PID</th><th class="num">稼働</th><th class="num">RSS</th>
-        <th>ポート</th><th class="num">ラウンド</th><th class="num">loss</th><th class="num">acc</th><th class="num">最終更新</th><th class="num">時計ずれ</th><th class="num">TB</th><th>最終イベント</th>
+        <th class="num">電力</th><th class="num">温度</th><th>ポート</th><th class="num">ラウンド</th><th class="num">loss</th><th class="num">acc</th><th class="num">最終更新</th><th class="num">時計ずれ</th><th class="num">TB</th><th>最終イベント</th>
       </tr></thead>
       <tbody id="nodes"></tbody>
     </table>
@@ -99,6 +101,10 @@
     <h2>各ノードの Global ラウンド進行（時刻）</h2>
     <canvas id="c-rounds" style="height:300px"></canvas>
     <div class="legend" id="legend-rounds"></div>
+  </div>
+  <div class="charts two">
+    <div class="card"><h2>消費電力 VDD_IN（W、1分ごと）</h2><canvas id="c-power"></canvas><div class="legend" id="legend-power"></div></div>
+    <div class="card"><h2>温度 tj（℃、1分ごと）</h2><canvas id="c-temp"></canvas><div class="legend" id="legend-temp"></div></div>
   </div>
   <div class="card">
     <details><summary>Global 評価の表（直近 50 ラウンド）</summary>
@@ -132,13 +138,16 @@
     canvas.width = w * dpr; canvas.height = h * dpr;
     const ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr);
     const pad = { l: 48, r: 16, t: 12, b: 28 };
-    const pts = series.flatMap(s => s.points);
-    if (!pts.length) { ctx.fillStyle = css('--muted'); ctx.font = '13px system-ui'; ctx.fillText('データ待ち', pad.l, h / 2); canvas._hit = null; return; }
-    const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
-    let x0 = Math.min(...xs), x1 = Math.max(...xs); if (x1 === x0) x1 = x0 + 60;
-    let y0 = opts.yMin != null ? opts.yMin : Math.min(...ys), y1 = opts.yMax != null ? opts.yMax : Math.max(...ys);
+    let x0 = Infinity, x1 = -Infinity, ymin = Infinity, ymax = -Infinity, count = 0;
+    series.forEach(s => s.points.forEach(p => {
+      if (p[1] == null || !isFinite(p[1])) return;
+      count++; x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]); ymin = Math.min(ymin, p[1]); ymax = Math.max(ymax, p[1]);
+    }));
+    if (!count) { ctx.fillStyle = css('--muted'); ctx.font = '13px system-ui'; ctx.fillText('データ待ち', pad.l, h / 2); canvas._hit = null; return; }
+    if (x1 === x0) x1 = x0 + 60;
+    let y0 = opts.yMin != null ? opts.yMin : ymin, y1 = opts.yMax != null ? opts.yMax : ymax;
     if (y1 === y0) { y1 = y0 + 1; }
-    if (opts.yMin == null) { const m = (y1 - y0) * 0.08; y0 -= m; y1 += m; if (opts.zero) y0 = Math.min(0, y0); }
+    if (opts.yMin == null) { const m = (y1 - y0) * 0.08; y0 -= m; y1 += m; if (opts.zero && ymin >= 0) y0 = 0; }
     const X = t => pad.l + (t - x0) / (x1 - x0) * (w - pad.l - pad.r);
     const Y = v => h - pad.b - (v - y0) / (y1 - y0) * (h - pad.t - pad.b);
     // grid + ticks
@@ -158,9 +167,20 @@
       if (!s.points.length) return;
       ctx.strokeStyle = s.color; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
       ctx.beginPath();
-      s.points.forEach((p, i) => { const x = X(p[0]), y = Y(p[1]); if (i === 0) ctx.moveTo(x, y); else if (opts.step) { ctx.lineTo(x, Y(s.points[i - 1][1])); ctx.lineTo(x, y); } else ctx.lineTo(x, y); });
+      const gap = opts.gap != null ? opts.gap : 300;  // これ以上記録が空いたら線を切る (停止・電源断)
+      let prev = null;
+      s.points.forEach(p => {
+        if (p[1] == null || !isFinite(p[1])) { prev = null; return; }
+        const x = X(p[0]), y = Y(p[1]);
+        if (!prev || p[0] - prev[0] > gap) ctx.moveTo(x, y);
+        else if (opts.step) { ctx.lineTo(x, Y(prev[1])); ctx.lineTo(x, y); }
+        else ctx.lineTo(x, y);
+        prev = p;
+      });
       ctx.stroke();
-      const last = s.points[s.points.length - 1];
+      const valid = s.points.filter(p => p[1] != null && isFinite(p[1]));
+      if (!valid.length) return;
+      const last = valid[valid.length - 1];
       ctx.beginPath(); ctx.arc(X(last[0]), Y(last[1]), 6, 0, Math.PI * 2); ctx.fillStyle = css('--surface'); ctx.fill();
       ctx.beginPath(); ctx.arc(X(last[0]), Y(last[1]), 4, 0, Math.PI * 2); ctx.fillStyle = s.color; ctx.fill();
       if (opts.endLabel) { ctx.fillStyle = css('--ink-2'); ctx.font = '11px system-ui'; ctx.textAlign = 'left'; ctx.fillText(s.name, Math.min(X(last[0]) + 8, w - pad.r - 40), Y(last[1]) + 4); }
@@ -175,7 +195,8 @@
       const rows = [];
       hit.series.forEach(s => {
         if (!s.points.length) return;
-        let best = s.points[0]; for (const p of s.points) { if (Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p; }
+        let best = null; for (const p of s.points) { if (p[1] == null) continue; if (!best || Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p; }
+        if (!best) return;
         rows.push(`<span class="swatch" style="background:${s.color}"></span>${s.name}: ${format(best)}`);
       });
       tooltip.innerHTML = `<div class="muted">${fmtDateTime(t)}</div>` + rows.join('<br>');
@@ -186,6 +207,12 @@
   attachHover(document.getElementById('c-acc'), p => `accuracy ${fmt(p[1])} (round ${p[2]})`);
   attachHover(document.getElementById('c-loss'), p => `loss ${fmt(p[1])} (round ${p[2]})`);
   attachHover(document.getElementById('c-rounds'), p => `round ${p[1]}`);
+  attachHover(document.getElementById('c-power'), p => `${fmt(p[1], 2)} W`);
+  attachHover(document.getElementById('c-temp'), p => `${fmt(p[1], 1)} ℃`);
+  function legendTo(id, series) {
+    const el = document.getElementById(id); el.innerHTML = '';
+    series.forEach(s => { const sp = document.createElement('span'); sp.innerHTML = `<span class="swatch" style="background:${s.color}"></span>${s.name}`; el.appendChild(sp); });
+  }
 
   let lastStatus = null;
   function render(st) {
@@ -193,13 +220,16 @@
     const s = st.summary || {};
     document.getElementById('run').textContent = st.run_id || '';
     const age = Math.round(Date.now() / 1000 - st.t);
-    document.getElementById('meta').textContent = `更新 ${st.generated_at}（${age}s 前） · ${st.profile} · ${st.interval_s}s 間隔 · 監視ホスト ${st.monitor_host || ''}`;
+    const begun = s.first_eval_t ? `実験開始 ${fmtDateTime(s.first_eval_t)} · ` : '';
+    document.getElementById('meta').textContent = `${begun}更新 ${st.generated_at}（${age}s 前） · ${st.profile} · ${st.interval_s}s 間隔 · 監視ホスト ${st.monitor_host || ''}${st.catching_up ? ' · 記録を取り込み中…' : ''}`;
     document.getElementById('t-alive').innerHTML = `${s.alive ?? '–'}<small> / ${s.total ?? '–'}</small>`;
     document.getElementById('t-round').textContent = s.global_round ?? '–';
     document.getElementById('t-acc').textContent = fmt(s.last_accuracy, 4);
     document.getElementById('t-loss').textContent = fmt(s.last_loss, 4);
     document.getElementById('t-up').textContent = fmtDur(s.global_uptime_s);
     document.getElementById('t-rs').innerHTML = s.expected_round_s != null ? `${s.expected_round_s}<small> s</small>` : '–';
+    document.getElementById('t-power').innerHTML = s.total_power_w != null ? `${fmt(s.total_power_w, 1)}<small> W</small>` : '–';
+    document.getElementById('t-resume').innerHTML = `${s.resumes ?? 0}<small> 回 / 停止 ${fmtDur(s.downtime_s || 0)}</small>`;
     const alerts = document.getElementById('alerts'); alerts.innerHTML = '';
     (st.alerts || []).forEach(a => { const li = document.createElement('li'); li.textContent = '⚠ ' + a; if (/時計ずれ|更新されて/.test(a)) li.className = 'warn'; alerts.appendChild(li); });
     const tbody = document.getElementById('nodes'); tbody.innerHTML = '';
@@ -207,10 +237,12 @@
     (st.nodes || []).forEach((n, i) => {
       const tr = document.createElement('tr');
       const port = n.port_listening == null ? '–' : (n.port_listening ? `${n.port} 待受` : `${n.port} 閉`);
+      const power = ((n.metrics || {}).power_mw || {}).VDD_IN, temp = ((n.metrics || {}).temp_c || {}).tj;
       const le = n.last_event ? `${n.last_event.proc || ''}/${n.last_event.event}${n.last_event.reason ? ' (' + n.last_event.reason + ')' : ''}` : '–';
       tr.innerHTML = `<td><span class="swatch" style="background:${css(SERIES[i % 8])}"></span>${n.num}</td><td>${n.id}</td><td>${n.role}</td>`
         + `<td><span class="state st-${n.state}"><span class="dot"></span>${STATE_ICON[n.state] || ''} ${STATE_LABEL[n.state] || n.state}${n.exit_code != null ? ' (exit ' + n.exit_code + ')' : ''}</span></td>`
         + `<td class="num">${n.pid ?? '–'}</td><td class="num">${fmtDur(n.uptime_s)}</td><td class="num">${n.rss_mb != null ? n.rss_mb + ' MB' : '–'}</td>`
+        + `<td class="num">${power != null ? fmt(power / 1000, 1) + ' W' : '–'}</td><td class="num">${temp != null ? fmt(temp, 0) + ' ℃' : '–'}</td>`
         + `<td>${port}</td><td class="num">${n.current_round ?? '–'}</td><td class="num">${fmt(n.last_loss)}</td><td class="num">${fmt(n.last_accuracy)}</td>`
         + `<td class="num">${n.last_event_age_s != null ? Math.round(n.last_event_age_s) + ' s' : '–'}</td>`
         + `<td class="num">${n.clock_offset_s != null ? (n.clock_offset_s > 0 ? '+' : '') + n.clock_offset_s.toFixed(1) + ' s' : '–'}</td>`
@@ -226,8 +258,13 @@
     const rs = st.round_series || {};
     const series = (st.nodes || []).map((n, i) => ({ name: `${n.num} ${n.id}`, color: css(SERIES[i % 8]), points: (rs[String(n.num)] || []).map(p => [p[0], p[1]]) }));
     drawLines(document.getElementById('c-rounds'), series, { step: true, zero: true, yFmt: v => Math.round(v).toLocaleString(), endLabel: false });
-    const legend = document.getElementById('legend-rounds'); legend.innerHTML = '';
-    series.forEach(s => { const el = document.createElement('span'); el.innerHTML = `<span class="swatch" style="background:${s.color}"></span>${s.name}`; legend.appendChild(el); });
+    legendTo('legend-rounds', series);
+    const ms = st.metric_series || {};
+    const metric = (k) => (st.nodes || []).map((n, i) => ({ name: `${n.num} ${n.id}`, color: css(SERIES[i % 8]), points: (ms[String(n.num)] || []).map(p => [p[0], p[k]]) }));
+    const powerSeries = metric(1), tempSeries = metric(2);
+    drawLines(document.getElementById('c-power'), powerSeries, { zero: true, yFmt: v => v.toFixed(1) });
+    drawLines(document.getElementById('c-temp'), tempSeries, { yFmt: v => v.toFixed(0) });
+    legendTo('legend-power', powerSeries); legendTo('legend-temp', tempSeries);
     const evals = document.getElementById('evals'); evals.innerHTML = '';
     gs.slice(-50).reverse().forEach(p => { const tr = document.createElement('tr'); tr.innerHTML = `<td>${fmtDateTime(p.t)}</td><td class="num">${p.round}</td><td class="num">${fmt(p.loss, 4)}</td><td class="num">${fmt(p.accuracy, 4)}</td><td class="num">${fmt(p.round_duration_s, 1)}</td>`; evals.appendChild(tr); });
   }

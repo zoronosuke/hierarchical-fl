@@ -17,6 +17,13 @@ clock_offsets.json (scripts/hfl.sh collect が書く) があれば t_corrected =
     participation.png            参加マトリクス (ノード × ラウンド)
     fit_duration.png             各ノードの fit 所要時間 vs 時刻
     round_duration.png           Global ラウンド所要時間 vs 時刻
+
+監視役 (scripts/hfl_monitor.py) のフォルダ logs/<run_id>/monitor を渡すと、ミラーした events と
+metrics.jsonl (電力・温度) も読み、次も出力する:
+    metrics.csv                  電力・温度・メモリをフラット化
+    power.png                    各ノードの消費電力 (VDD_IN) vs 時刻
+    temperature.png              各ノードの温度 (tj) vs 時刻
+    summary.json の "power"       ノードごとの平均・最大電力 (W)、消費電力量 (Wh)、最高温度
 """
 
 from __future__ import annotations
@@ -201,6 +208,86 @@ def _session_breaks(events: list[dict[str, Any]], key: NodeKey) -> list[float]:
     )
 
 
+# metrics.jsonl のサンプル間隔がこれより空いたら、その間は電力量に数えない (監視停止・到達不能)
+METRIC_MAX_GAP_S = 120.0
+
+
+def load_metrics(root: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for path in sorted(root.rglob("metrics.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record.get("t"), (int, float)):
+                records.append(record)
+    records.sort(key=lambda r: (r["t"], str(r.get("node_num"))))
+    return records
+
+
+def metric_key(record: dict[str, Any]) -> NodeKey:
+    return (record.get("node_num"), record.get("node") or "")
+
+
+def _vdd_in_w(record: dict[str, Any]) -> float | None:
+    milliwatts = (record.get("power_mw") or {}).get("VDD_IN")
+    return None if milliwatts is None else milliwatts / 1000.0
+
+
+def summarize_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """ノードごとの平均・最大電力、消費電力量 (台形則)、最高温度。"""
+    by_node: dict[NodeKey, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        by_node[metric_key(record)].append(record)
+    nodes: dict[str, Any] = {}
+    total_wh = 0.0
+    for key in sorted(by_node, key=lambda k: str(k[0])):
+        samples = [(r["t"], _vdd_in_w(r)) for r in by_node[key] if _vdd_in_w(r) is not None]
+        energy_wh = 0.0
+        for (t0, p0), (t1, p1) in zip(samples, samples[1:]):
+            if 0 < t1 - t0 <= METRIC_MAX_GAP_S:
+                energy_wh += (p0 + p1) / 2 * (t1 - t0) / 3600.0
+        temps = [
+            (r.get("temp_c") or {}).get("tj") for r in by_node[key]
+            if (r.get("temp_c") or {}).get("tj") is not None
+        ]
+        powers = [p for _, p in samples]
+        nodes[node_label(key)] = {
+            "samples": len(by_node[key]),
+            "mean_power_w": round(statistics.fmean(powers), 2) if powers else None,
+            "max_power_w": round(max(powers), 2) if powers else None,
+            "energy_wh": round(energy_wh, 2),
+            "max_temp_c": max(temps) if temps else None,
+        }
+        total_wh += energy_wh
+    return {
+        "first": _iso(records[0]["t"]) if records else None,
+        "last": _iso(records[-1]["t"]) if records else None,
+        "total_energy_wh": round(total_wh, 2),
+        "nodes": nodes,
+    }
+
+
+def write_metrics_csv(records: list[dict[str, Any]], path: Path) -> None:
+    rows = []
+    for record in records:
+        row = {k: v for k, v in record.items() if not isinstance(v, dict)}
+        for group in ("power_mw", "temp_c"):
+            for name, value in (record.get(group) or {}).items():
+                row[f"{group}.{name}"] = value
+        rows.append(row)
+    columns: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in columns:
+                columns.append(key)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def summarize(events: list[dict[str, Any]]) -> dict[str, Any]:
     by_node: dict[NodeKey, list[dict[str, Any]]] = defaultdict(list)
     for event in events:
@@ -289,7 +376,9 @@ def _participation_matrix(events: list[dict[str, Any]]):
     return rows, matrix / counts, max_round, bins
 
 
-def make_plots(events: list[dict[str, Any]], out: Path) -> list[Path]:
+def make_plots(
+    events: list[dict[str, Any]], out: Path, metrics: list[dict[str, Any]] | None = None
+) -> list[Path]:
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -434,6 +523,32 @@ def make_plots(events: list[dict[str, Any]], out: Path) -> list[Path]:
         save(fig, "fit_duration.png")
     else:
         plt.close(fig)
+
+    # 7, 8. 電力・温度 (監視役の metrics.jsonl があるとき)
+    if metrics:
+        metric_nodes = sorted({metric_key(r) for r in metrics}, key=lambda k: str(k[0]))
+        for name, title, ylabel, value in (
+            ("power.png", "Power per node (VDD_IN)", "W", _vdd_in_w),
+            ("temperature.png", "Temperature per node (tj)", "deg C",
+             lambda r: (r.get("temp_c") or {}).get("tj")),
+        ):
+            fig, ax = plt.subplots(figsize=(11, 5))
+            for i, key in enumerate(metric_nodes):
+                pts = [
+                    (r["t"], value(r)) for r in metrics
+                    if metric_key(r) == key and value(r) is not None
+                ]
+                if not pts:
+                    continue
+                ts, ys = _with_breaks(pts, [], max_gap=SILENT_GAP_S)
+                color = color_of.get(key, SERIES[i % len(SERIES)])
+                ax.plot(to_dt(ts), ys, color=color, lw=1.2, label=node_label(key))
+            shade_outages(ax)
+            ax.set_ylabel(ylabel)
+            ax.set_title(title)
+            ax.xaxis.set_major_formatter(date_fmt)
+            ax.legend(ncol=4, fontsize=9)
+            save(fig, name)
     return written
 
 
@@ -454,10 +569,14 @@ def main(argv: list[str] | None = None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     write_csv(events, out / "events.csv")
     summary = summarize(events)
+    metrics = load_metrics(root)
+    if metrics:
+        write_metrics_csv(metrics, out / "metrics.csv")
+        summary["power"] = summarize_metrics(metrics)
     (out / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    written = [] if args.no_plots else make_plots(events, out)
+    written = [] if args.no_plots else make_plots(events, out, metrics)
 
     print(f"events: {len(events)}  ->  {out / 'events.csv'}")
     print(
@@ -471,6 +590,14 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"  {label:<14} fits={info['fits']:<6} last_round={info['last_round']:<7} exit={exits}"
         )
+    if metrics:
+        power = summary["power"]
+        print(f"power: {len(metrics)} samples, total energy {power['total_energy_wh']} Wh")
+        for label, info in power["nodes"].items():
+            print(
+                f"  {label:<14} mean={info['mean_power_w']} W max={info['max_power_w']} W "
+                f"energy={info['energy_wh']} Wh max_temp={info['max_temp_c']} C"
+            )
     for path in written:
         print(f"  wrote {path}")
     return 0
