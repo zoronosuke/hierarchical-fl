@@ -121,14 +121,91 @@ def _iso(t: float) -> str:
     return datetime.fromtimestamp(t).isoformat()
 
 
+def _global_evals(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """学習で得た Global 評価 (再開直後のチェックポイント評価は除く)。"""
+    return sorted(
+        (
+            e for e in events
+            if e.get("proc") == "global" and e.get("event") == "eval"
+            and e.get("global_round") and not e.get("resumed")
+        ),
+        key=_tkey,
+    )
+
+
+def outages(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Global の resume ごとに、学習が止まっていた区間を返す。
+
+    区間 = 停止前の最後の評価 〜 再開後の最初の評価 (学習が実際に進まなかった時間)。
+    """
+    evals = _global_evals(events)
+    resumes = sorted(
+        (e for e in events if e.get("proc") == "global" and e.get("event") == "resume"),
+        key=_tkey,
+    )
+    spans = []
+    for resume in resumes:
+        tr = _tkey(resume)
+        before = [_tkey(e) for e in evals if _tkey(e) < tr]
+        after = [_tkey(e) for e in evals if _tkey(e) > tr]
+        start = before[-1] if before else tr
+        end = after[0] if after else tr
+        spans.append({
+            "from_t": start,
+            "to_t": end,
+            "from": _iso(start),
+            "to": _iso(end),
+            "minutes": round((end - start) / 60, 1),
+            "resumed_from_round": resume.get("global_round"),
+        })
+    return spans
+
+
+# これ以上イベントが無ければ、その間ノードが動いていた証拠は無いとみなして線を切る
+SILENT_GAP_S = 300.0
+
+
+def _with_breaks(
+    points: list[tuple[float, float]], breaks: list[float], max_gap: float | None = None
+):
+    """break の時刻をまたぐ所に NaN を挟み、線を途切れさせる。
+
+    max_gap を指定すると、break が無いまま max_gap 秒以上イベントが途切れた所でも、
+    直前の点の直後で線を切る (電源断や強制終了では終了イベントが残らないため)。
+    """
+    xs: list[float] = []
+    ys: list[float] = []
+    pending = sorted(breaks)
+    for t, y in points:
+        if xs and pending and xs[-1] < pending[0] <= t:
+            xs.append(pending[0])
+            ys.append(float("nan"))
+        elif xs and max_gap is not None and t - xs[-1] > max_gap:
+            xs.append(xs[-1] + 1.0)
+            ys.append(float("nan"))
+        while pending and pending[0] <= t:
+            pending.pop(0)
+        xs.append(t)
+        ys.append(y)
+    return xs, ys
+
+
+def _session_breaks(events: list[dict[str, Any]], key: NodeKey) -> list[float]:
+    """そのノードの線を切る時刻: プロセスの終了 (stop / error)。
+
+    step 図は次の点まで水平に伸びるので、終了時刻で切れば「その時刻まで動いていた」になり、
+    再起動までの空白が残る。
+    """
+    return sorted(
+        _tkey(e) for e in events if node_key(e) == key and e.get("event") in ("stop", "error")
+    )
+
+
 def summarize(events: list[dict[str, Any]]) -> dict[str, Any]:
     by_node: dict[NodeKey, list[dict[str, Any]]] = defaultdict(list)
     for event in events:
         by_node[node_key(event)].append(event)
-    global_evals = [
-        e for e in events
-        if e.get("proc") == "global" and e.get("event") == "eval" and e.get("global_round")
-    ]
+    global_evals = _global_evals(events)
     round_durations = [
         e["round_duration_s"] for e in global_evals
         if isinstance(e.get("round_duration_s"), (int, float))
@@ -146,6 +223,10 @@ def summarize(events: list[dict[str, Any]]) -> dict[str, Any]:
         "best_accuracy": max((e.get("accuracy") or 0 for e in global_evals), default=None),
         "round_duration_s": _stats(round_durations),
         "first_start": _iso(min(starts)) if starts else None,
+        "outages": [
+            {k: v for k, v in span.items() if not k.endswith("_t")} for span in outages(events)
+        ],
+        "total_downtime_h": round(sum(span["minutes"] for span in outages(events)) / 60, 3),
         "last_stop": _iso(max(stops)) if stops else None,
         "nodes": {},
     }
@@ -242,6 +323,15 @@ def make_plots(events: list[dict[str, Any]], out: Path) -> list[Path]:
         plt.close(fig)
         written.append(path)
 
+    spans = outages(events)
+
+    def shade_outages(ax) -> None:
+        for i, span in enumerate(spans):
+            ax.axvspan(
+                datetime.fromtimestamp(span["from_t"]), datetime.fromtimestamp(span["to_t"]),
+                color=MUTED, alpha=0.15, lw=0, label="stopped" if i == 0 else None,
+            )
+
     def node_points(n: NodeKey, event_name: str | None, value_key: str):
         return sorted(
             (_tkey(e), e[value_key]) for e in events
@@ -256,9 +346,11 @@ def make_plots(events: list[dict[str, Any]], out: Path) -> list[Path]:
         pts = node_points(n, None, "global_round")
         if not pts:
             continue
-        xs, ys = to_dt([p[0] for p in pts]), [p[1] for p in pts]
+        ts, ys = _with_breaks(pts, _session_breaks(events, n), max_gap=SILENT_GAP_S)
+        xs = to_dt(ts)
         ax.step(xs, ys, where="post", color=color_of[n], label=node_label(n))
         ax.plot(xs[-1:], ys[-1:], "o", ms=7, color=color_of[n], mec=SURFACE, mew=1.5)
+    shade_outages(ax)
     ax.set_ylabel("Global round")
     ax.set_title("Global round progress per node")
     ax.xaxis.set_major_formatter(date_fmt)
@@ -266,28 +358,30 @@ def make_plots(events: list[dict[str, Any]], out: Path) -> list[Path]:
     save(fig, "timeline_rounds.png")
 
     # 2. Global accuracy / loss vs 時刻, 3. vs ラウンド, 6. ラウンド所要時間
-    evals = sorted(
-        (
-            e for e in events
-            if e.get("proc") == "global" and e.get("event") == "eval" and e.get("global_round")
-        ),
-        key=_tkey,
-    )
+    evals = _global_evals(events)
+    resume_times = [s["to_t"] for s in spans]
     if evals:
-        for name, xs, xlabel in (
-            ("global_metrics.png", to_dt([_tkey(e) for e in evals]), "time"),
-            ("global_metrics_vs_round.png", [e["global_round"] for e in evals], "Global round"),
-        ):
+        for name, by_time in (("global_metrics.png", True), ("global_metrics_vs_round.png", False)):
             fig, (a1, a2) = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
-            a1.plot(xs, [e.get("accuracy") for e in evals], color=SERIES[0])
-            a1.set_ylabel("accuracy")
+            for ax, key in ((a1, "accuracy"), (a2, "loss")):
+                pts = [(_tkey(e), e.get(key)) for e in evals]
+                ts, ys = _with_breaks(pts, resume_times)
+                if by_time:
+                    ax.plot(to_dt(ts), ys, color=SERIES[0])
+                    shade_outages(ax)
+                else:
+                    # 再開でやり直したラウンドは重なって描かれる
+                    round_at = {_tkey(e): e["global_round"] for e in evals}
+                    xs = [round_at.get(t, float("nan")) for t in ts]
+                    ax.plot(xs, ys, color=SERIES[0])
+                ax.set_ylabel(key)
             a1.set_ylim(0, 1)
             a1.set_title("Global evaluation (CIFAR-10 test)")
-            a2.plot(xs, [e.get("loss") for e in evals], color=SERIES[0])
-            a2.set_ylabel("loss")
-            a2.set_xlabel(xlabel)
-            if xlabel == "time":
+            a2.set_xlabel("time" if by_time else "Global round")
+            if by_time:
                 a2.xaxis.set_major_formatter(date_fmt)
+                if spans:
+                    a1.legend(loc="lower right", fontsize=9)
             save(fig, name)
 
         durations = [
@@ -296,8 +390,9 @@ def make_plots(events: list[dict[str, Any]], out: Path) -> list[Path]:
         ]
         if durations:
             fig, ax = plt.subplots(figsize=(11, 4))
-            ax.plot(to_dt([_tkey(e) for e, _ in durations]), [d for _, d in durations],
-                    color=SERIES[0])
+            ts, ys = _with_breaks([(_tkey(e), d) for e, d in durations], resume_times)
+            ax.plot(to_dt(ts), ys, color=SERIES[0])
+            shade_outages(ax)
             ax.set_ylabel("seconds")
             ax.set_title("Global round duration")
             ax.xaxis.set_major_formatter(date_fmt)
