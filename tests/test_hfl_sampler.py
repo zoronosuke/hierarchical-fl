@@ -142,3 +142,21 @@ def test_half_written_last_line_is_closed(tmp_path, monkeypatch):
     assert lines[1].startswith('{"t": 2')  # 途中の行は残すが閉じる
     last = json.loads(lines[2])
     assert last["net"]["tx_bytes"] == 10  # 最後の完全な行から引き継いだ
+
+
+def test_unreadable_sensor_is_skipped(tmp_path, monkeypatch):
+    """Jetson の cv*-thermal は読むと EAGAIN (Python では TypeError) になる。その項目だけ飛ばす。"""
+    _fake_sys(tmp_path, tx=1, rx=1)
+    zone = tmp_path / "class/thermal/thermal_zone2"
+    zone.mkdir(parents=True)
+    (zone / "type").write_text("cv0-thermal")
+    (zone / "temp").write_text("0")
+    original = Path.read_text
+
+    def flaky(self, *args, **kwargs):
+        if self == zone / "temp":
+            raise TypeError("can't concat NoneType to bytes")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+    assert hfl_sampler.read_temps(tmp_path) == {"tj": 47.1}

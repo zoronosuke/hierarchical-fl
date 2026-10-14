@@ -49,7 +49,8 @@ _BYTES = re.compile(r"bytes_(sent|received):(\d+)")
 def _read(path: Path) -> str | None:
     try:
         return path.read_text().strip()
-    except OSError:
+    except (OSError, TypeError, UnicodeDecodeError):
+        # Jetson の cv0〜cv2-thermal などは EAGAIN を返し、Python では TypeError になる
         return None
 
 
