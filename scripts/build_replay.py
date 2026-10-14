@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hfl_activity import describe  # noqa: E402
+from hfl_activity import describe, is_activity_event  # noqa: E402
 from hfl_nodes import load_inventory  # noqa: E402
 from plot_run import (  # noqa: E402
     _global_evals,
@@ -109,7 +109,7 @@ def build(root: Path, profile: str, from_round: int | None, to_round: int | None
         while ei < len(timeline) and _tkey(timeline[ei]) <= t:
             e = timeline[ei]
             num = e.get("node_num")
-            if num in proc_events and e.get("proc"):
+            if num in proc_events and e.get("proc") and is_activity_event(e):
                 proc_events[num][e["proc"]] = e
                 rnd = e.get("global_round")
                 if isinstance(rnd, int) and rnd > 0 and not e.get("resumed"):

@@ -524,8 +524,16 @@ cmd_wait() {
     local global_num
     for global_num in $HFL_NODE_NUMS; do [[ "${NODE_ROLE[$global_num]}" == "global" ]] && break; done
     log "waiting for global ($global_num) to finish (run_id=$RUN_ID)"
-    while remote "$global_num" "kill -0 \$(cat logs/$RUN_ID/hfl-$global_num.pid 2>/dev/null) 2>/dev/null"; do
-        remote "$global_num" "grep '\"event\": \"eval\"' logs/$RUN_ID/events-$global_num.jsonl 2>/dev/null | tail -n 1 | cut -c1-200" || true
+    local answer
+    while :; do
+        # SSH が一時的に失敗しても「終了した」と誤判定しないよう、生存を明示的に答えさせる
+        answer="$(remote "$global_num" "kill -0 \$(cat logs/$RUN_ID/hfl-$global_num.pid 2>/dev/null) 2>/dev/null && echo alive || echo dead" 2>/dev/null || true)"
+        [[ "$answer" == "dead" ]] && break
+        if [[ "$answer" == "alive" ]]; then
+            remote "$global_num" "grep '\"event\": \"eval\"' logs/$RUN_ID/events-$global_num.jsonl 2>/dev/null | tail -n 1 | cut -c1-200" || true
+        else
+            log "node $global_num unreachable; retrying"
+        fi
         sleep 30
     done
     remote "$global_num" "tail -n 5 logs/$RUN_ID/hfl-$global_num.log" || true

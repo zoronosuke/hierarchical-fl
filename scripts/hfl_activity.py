@@ -34,6 +34,15 @@ TIMELINE_SPANS = [
 ]
 
 
+def is_activity_event(event: dict[str, Any]) -> bool:
+    """「今なにをしているか」の判定に使うイベントか。
+
+    sub-server の eval は、子の結果を親へ返した後に記録される確認用の評価なので使わない
+    (使うと、返送後の待機中も「集約して親へ返送」と表示されてしまう)。
+    """
+    return not (event.get("proc") == "sub_server" and event.get("event") == "eval")
+
+
 def _hhmm(t: float | None) -> str:
     return time.strftime("%H:%M", time.localtime(t)) if t else "--:--"
 

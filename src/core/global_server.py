@@ -233,6 +233,12 @@ def main() -> None:
             set_parameters(model, ckpt_params)
             offset = int(ckpt_meta["global_round"])
             run_started_t = float(ckpt_meta.get("run_started_t", run_started_t))
+            # 開始時に --max-hours / --round-interval を指定していたら、再開でも同じ値を使う
+            # (再開時に改めて指定した場合はそちらを優先する)
+            if args.max_hours is None and "max_hours" in ckpt_meta:
+                max_hours = ckpt_meta["max_hours"]
+            if args.round_interval is None and "round_interval_s" in ckpt_meta:
+                round_interval = ckpt_meta["round_interval_s"]
             downtime = time.time() - float(ckpt_meta.get("saved_t", time.time()))
             logger.info(
                 f"Resuming from checkpoint {args.checkpoint}: global_round={offset}, "
@@ -273,7 +279,12 @@ def main() -> None:
             every=int(srv_cfg.get("checkpoint_every", 1)),
             offset=offset,
             run_started_t=run_started_t,
-            meta={"run_id": os.environ.get("HFL_RUN_ID", ""), "config": args.config},
+            meta={
+                "run_id": os.environ.get("HFL_RUN_ID", ""),
+                "config": args.config,
+                "max_hours": max_hours,
+                "round_interval_s": round_interval,
+            },
             event_logger=event_logger,
         )
 

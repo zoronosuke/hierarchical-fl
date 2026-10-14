@@ -111,3 +111,13 @@ def test_replay_range_stops_once_accuracy_flattens():
     start, end = build_replay.choose_range(evals)
     assert start == 0
     assert build_replay.MIN_FRAMES - 1 <= end < 30  # 横ばいになったら止める (最低 20 コマ)
+
+
+def test_sub_server_eval_after_return_does_not_look_like_aggregation():
+    state = hfl_monitor.RunState()
+    state.consume_events(203, "edge", [
+        _ev(1, "sub_server", "child_result_sent", global_round=7),
+        _ev(2, "edge", "parent_fit_end", global_round=7),
+        _ev(3, "sub_server", "eval", global_round=7),  # 返送後の確認用の評価
+    ])
+    assert hfl_activity.describe("edge", state.node(203).proc_events)["phase"] == "idle"

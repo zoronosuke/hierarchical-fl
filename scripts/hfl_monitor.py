@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hfl_activity import RoundTimeline, describe  # noqa: E402
+from hfl_activity import RoundTimeline, describe, is_activity_event  # noqa: E402
 from hfl_nodes import Inventory, Node, load_inventory, self_num  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -350,7 +350,7 @@ class RunState:
                     self.next_round_t = event.get("next_round_t")
                 elif kind in ("round_start", "stop", "error", "start"):
                     self.next_round_t = None
-            if event.get("proc"):
+            if event.get("proc") and is_activity_event(event):
                 state.proc_events[event["proc"]] = event
             self.timeline.consume(num, event)
             state.last_event = event

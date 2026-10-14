@@ -229,9 +229,10 @@ def test_stop_and_resume_from_checkpoint(tmp_path):
     _, meta = load_checkpoint(run_dir / "checkpoint.npz")
     assert meta["global_round"] == first_last
 
-    code = _run_until_round(
-        repository, [*common, "--resume"], run_dir, first_last + 3, tmp_path / "run2.log"
-    )
+    # 再開では --max-hours を省略する: 開始時の値 (1 時間) をチェックポイントから引き継ぐ。
+    # 引き継がないと YAML の 0.03 時間が使われ、開始から時間が経っているので即停止してしまう
+    resume_args = [a for a in common if a not in ("--max-hours", "1")] + ["--resume"]
+    code = _run_until_round(repository, resume_args, run_dir, first_last + 3, tmp_path / "run2.log")
     log2 = (tmp_path / "run2.log").read_text(encoding="utf-8", errors="replace")
     assert code == 0, log2
     assert "Traceback" not in log1 + log2
@@ -239,6 +240,8 @@ def test_stop_and_resume_from_checkpoint(tmp_path):
     global_events = _events(run_dir / "events-global.jsonl")
     resumes = [r for r in global_events if r["event"] == "resume"]
     assert len(resumes) == 1 and resumes[0]["global_round"] == first_last
+    starts = [r for r in global_events if r["event"] == "start"]
+    assert starts[-1]["max_hours"] == 1.0  # 開始時の --max-hours を引き継いだ
     after = global_events[global_events.index(resumes[0]):]
     evals = [r["global_round"] for r in after if r["event"] == "eval" and not r.get("resumed")]
     assert evals[0] == first_last + 1 and evals == sorted(evals)
