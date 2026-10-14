@@ -57,6 +57,7 @@ class Inventory:
     defaults_config: str
     global_config: str
     topology_config: str
+    sampler_interval_s: float | None = None
     nodes: list[Node] = field(default_factory=list)
 
     def by_num(self, num: int) -> Node:
@@ -87,6 +88,9 @@ def load_inventory(profile: str) -> Inventory:
         subnet_prefix=str(raw.get("subnet_prefix", "192.168.10.")),
         remote_dir=str(raw.get("remote_dir", "~/hierarchical-fl-persistent")),
         monitor_port=int(raw.get("monitor_port", 8000)),
+        sampler_interval_s=(
+            float(raw["sampler_interval_s"]) if raw.get("sampler_interval_s") else None
+        ),
         defaults_config=str(raw.get("defaults_config", "config/defaults.yaml")),
         global_config=f"{profile_dir.as_posix()}/global.yaml",
         topology_config=f"{profile_dir.as_posix()}/topology.yaml",
@@ -125,6 +129,7 @@ def build_command(
     dry_run: bool = False,
     max_hours: float | None = None,
     resume: bool = False,
+    round_interval: float | None = None,
 ) -> list[str]:
     """python に渡す引数列 (-m 以降)。--max-hours と --resume は Global だけに付ける。"""
     common = [
@@ -136,6 +141,8 @@ def build_command(
         args = ["-m", "src.core.global_server", "--config", inventory.global_config]
         if max_hours is not None:
             args += ["--max-hours", str(max_hours)]
+        if round_interval is not None:
+            args += ["--round-interval", str(round_interval)]
         if resume:
             args.append("--resume")
     elif node.role == "edge":
@@ -260,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
     cmd_parser.add_argument("--dry-run", action="store_true")
     cmd_parser.add_argument("--max-hours", type=float, default=None)
     cmd_parser.add_argument("--resume", action="store_true")
+    cmd_parser.add_argument("--round-interval", type=float, default=None)
     args = parser.parse_args(argv)
 
     inventory = load_inventory(args.profile)
@@ -275,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
             "ssh_user_prefix": inventory.ssh_user_prefix,
             "remote_dir": inventory.remote_dir,
             "monitor_port": inventory.monitor_port,
+            "sampler_interval_s": inventory.sampler_interval_s,
             "no_proxy_list": inventory.no_proxy_list(),
             "global_config": inventory.global_config,
             "topology_config": inventory.topology_config,
@@ -305,7 +314,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "command":
         node = inventory.by_num(args.num)
         command = build_command(
-            inventory, node, dry_run=args.dry_run, max_hours=args.max_hours, resume=args.resume
+            inventory, node, dry_run=args.dry_run, max_hours=args.max_hours, resume=args.resume,
+            round_interval=args.round_interval,
         )
         for arg in command:
             print(arg)

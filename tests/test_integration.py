@@ -253,3 +253,33 @@ def test_stop_and_resume_from_checkpoint(tmp_path):
     assert first_last + 1 in leaf_fits and max(leaf_fits) >= first_last + 3
     for name in ("global", "edge_01", "edge_02", "leaf_01", "leaf_03", "leaf_02", "leaf_04"):
         assert not [r for r in _events(run_dir / f"events-{name}.jsonl") if r["event"] == "error"]
+
+
+def test_paced_rounds_start_on_interval_marks():
+    """学習間隔 (3 秒、時計の区切りに合わせる) で 4 ラウンド回り、全プロセスが正常終了する。"""
+    repository = Path(__file__).resolve().parents[1]
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        completed = subprocess.run(
+            [
+                sys.executable, "run.py", "--dry-run",
+                "--global-config", "config/local-5tier/global_paced.yaml",
+                "--topology-config", "config/local-5tier/topology.yaml",
+                "--run-id", "paced", "--log-dir", tmp,
+                "--completion-timeout", "240",
+            ],
+            cwd=repository, capture_output=True, text=True, timeout=300, check=False,
+        )
+        log = completed.stdout + completed.stderr
+        assert completed.returncode == 0, log
+        assert "Traceback" not in log
+        events = _events(Path(tmp) / "paced" / "events-global.jsonl")
+    starts = [e["t"] for e in events if e["event"] == "round_start"]
+    waits = [e for e in events if e["event"] == "wait"]
+    assert len(starts) == 4 and len(waits) == 3
+    for t in starts[1:]:
+        assert abs(t / 3 - round(t / 3)) * 3 < 0.5  # 3 秒の区切りに合わせて始まる
+    assert all(b - a >= 2.5 for a, b in zip(starts, starts[1:]))
+    start_event = next(e for e in events if e["event"] == "start")
+    assert start_event["round_interval_s"] == 3 and start_event["round_align"] == "clock"

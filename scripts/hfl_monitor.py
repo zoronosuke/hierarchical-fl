@@ -11,7 +11,9 @@ Jetson 7台の生存監視と記録のミラー。FL のコアには触れない
 
 出力 (既定: logs/<run-id>/monitor/、HTTP でも配信する):
     mirror/<NUM>/events-<NUM>.jsonl, mirror/<NUM>/hfl-<NUM>.log   各ノードの記録のコピー
-    metrics.jsonl        電力・温度・メモリ (ノードごと・ポーリングごとに1行)
+    mirror/<NUM>/metrics-<NUM>.jsonl  Jetson 側の記録 (電力・温度・通信量、5秒ごと)。
+                                      台帳に sampler_interval_s がある profile で使う
+    metrics.jsonl        Jetson 側の記録が無い run だけ、監視役が電力・温度を記録する
     clock_offsets.json   各ノードの時計ずれ (plot_run.py が補正に使う)
     status.json          監視ページ (index.html) が読む状態とグラフ用データ
 
@@ -44,12 +46,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hfl_activity import RoundTimeline, describe  # noqa: E402
 from hfl_nodes import Inventory, Node, load_inventory, self_num  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MIRROR_CHUNK_BYTES = 16 * 1024 * 1024  # 1回のポーリングで1ファイルから取り込む上限
 ONCE_EVENTS_TAIL_BYTES = 64 * 1024     # --once で読む events の末尾
 LOG_TAIL_BYTES = 4096
+METRICS_TAIL_BYTES = 8192             # --once で読む Jetson 側の記録の末尾
+NET_RATE_WINDOW_S = 60.0              # 送信速度は直近 1 分の平均
 METRIC_CHART_INTERVAL_S = 60.0         # 監視ページの電力・温度グラフは1分に1点
 STALE_FACTOR = 3.0        # 最新イベントからの経過が「想定ラウンド時間 × この倍率」を超えたら stale
 DEFAULT_ROUND_S = 60.0    # ラウンド時間が未観測のときの想定
@@ -82,6 +87,12 @@ echo "__PROCS__ $(pgrep -fc '[s]rc\.core' 2>/dev/null || true)"
 echo "__LOAD__ $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
 echo "__DISK__ $(df -Pm . 2>/dev/null | awk 'NR==2{print $4}')"
 echo "__STOP__ $( [ -f logs/$R/STOP ] && echo 1 || echo 0 )"
+spid=$(cat logs/$R/sampler-$N.pid 2>/dev/null)
+if [ -n "$spid" ] && tr '\0' ' ' < /proc/$spid/cmdline 2>/dev/null | grep -q hfl_sampler.py; then
+  echo "__SAMPLER__ 1"
+else
+  echo "__SAMPLER__ 0"
+fi
 echo "__MEM__ $(awk '/MemTotal/{t=$2} /MemAvailable/{a=$2} END{print t+0, a+0}' /proc/meminfo)"
 for h in /sys/class/hwmon/hwmon*; do
   case "$(cat "$h/name" 2>/dev/null)" in
@@ -283,6 +294,9 @@ class NodeState:
     log_tail: list[str] = field(default_factory=list)
     last_metric_chart_t: float = 0.0
     metrics: dict[str, Any] | None = None
+    has_sampler: bool = False  # Jetson 側の記録 (metrics-<NUM>.jsonl) がある
+    net_history: list[tuple[float, int, int]] = field(default_factory=list)  # (t, tx, rx)
+    proc_events: dict[str, dict[str, Any]] = field(default_factory=dict)  # proc → 最新イベント
 
 
 class RunState:
@@ -294,6 +308,9 @@ class RunState:
         self.round_series: dict[str, list[list[float]]] = {}
         self.metric_series: dict[str, list[list[float | None]]] = {}
         self.resumes: list[dict[str, Any]] = []
+        self.round_interval_s: float | None = None
+        self.next_round_t: float | None = None
+        self.timeline = RoundTimeline()
 
     def node(self, num: int) -> NodeState:
         return self.nodes.setdefault(num, NodeState())
@@ -325,6 +342,17 @@ class RunState:
             if "accuracy" in event and "loss" in event and not resumed:
                 state.last_loss = event["loss"]
                 state.last_accuracy = event["accuracy"]
+            if role == "global":
+                kind = event.get("event")
+                if kind == "start":
+                    self.round_interval_s = event.get("round_interval_s") or None
+                if kind == "wait":
+                    self.next_round_t = event.get("next_round_t")
+                elif kind in ("round_start", "stop", "error", "start"):
+                    self.next_round_t = None
+            if event.get("proc"):
+                state.proc_events[event["proc"]] = event
+            self.timeline.consume(num, event)
             state.last_event = event
 
     def consume_log(self, num: int, data: bytes) -> None:
@@ -347,24 +375,56 @@ class RunState:
     def consume_metrics(self, num: int, t: float, metrics: dict[str, Any]) -> None:
         state = self.node(num)
         state.metrics = metrics
+        net = metrics.get("net") or {}
+        if isinstance(net.get("tx_bytes"), int):
+            state.net_history.append((t, net["tx_bytes"], net.get("rx_bytes") or 0))
+            cutoff = t - 3 * NET_RATE_WINDOW_S
+            while state.net_history and state.net_history[0][0] < cutoff:
+                state.net_history.pop(0)
         if t - state.last_metric_chart_t >= METRIC_CHART_INTERVAL_S:
-            power = metrics.get("power_mw", {}).get("VDD_IN")
-            temp = metrics.get("temp_c", {}).get("tj")
+            power = (metrics.get("power_mw") or {}).get("VDD_IN")
+            temp = (metrics.get("temp_c") or {}).get("tj")
             self.metric_series.setdefault(str(num), []).append([
                 round(t, 1),
                 round(power / 1000.0, 2) if power is not None else None,
                 temp,
+                net.get("tx_bytes"),
             ])
             state.last_metric_chart_t = t
 
+    def consume_sampler_records(self, num: int, records: list[dict[str, Any]]) -> None:
+        """Jetson 側の記録 (5秒ごと)。"""
+        if records:
+            self.node(num).has_sampler = True
+        for record in records:
+            if isinstance(record.get("t"), (int, float)):
+                self.consume_metrics(num, float(record["t"]), record)
+
+    def net_rates(self, num: int) -> tuple[float | None, float | None]:
+        """直近 1 分の送信・受信速度 (bytes/s)。"""
+        history = self.node(num).net_history
+        if len(history) < 2:
+            return None, None
+        t1, tx1, rx1 = history[-1]
+        older = [h for h in history if t1 - h[0] >= NET_RATE_WINDOW_S]
+        t0, tx0, rx0 = older[-1] if older else history[0]
+        if t1 - t0 < 10:
+            return None, None
+        return max(tx1 - tx0, 0) / (t1 - t0), max(rx1 - rx0, 0) / (t1 - t0)
+
     def expected_round_s(self) -> float:
+        if self.round_interval_s:
+            return max(float(self.round_interval_s), self._median_round_s() or 0.0)
+        return self._median_round_s() or DEFAULT_ROUND_S
+
+    def _median_round_s(self) -> float | None:
         if len(self.global_series) >= 3:
             recent = self.global_series[-10:]
             spans = [b["t"] - a["t"] for a, b in zip(recent, recent[1:]) if b["t"] > a["t"]]
             if spans:
                 median = sorted(spans)[len(spans) // 2]
                 return max(min(median, 3600.0), 5.0)
-        return DEFAULT_ROUND_S
+        return None
 
 
 # ------------------------------------------------------------------------ 監視本体
@@ -420,13 +480,19 @@ class Monitor:
             log_path = self.store.path(node.num, f"hfl-{node.num}.log")
             if log_path.exists():
                 self.state.consume_log(node.num, log_path.read_bytes())
+            metrics_path = self.store.path(node.num, f"metrics-{node.num}.jsonl")
+            if metrics_path.exists():
+                self.state.consume_sampler_records(
+                    node.num, parse_event_lines(metrics_path.read_bytes())
+                )
         if self.metrics_path.exists():
             for line in self.metrics_path.read_text(encoding="utf-8").splitlines():
                 try:
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                self.state.consume_metrics(record["node_num"], record["t"], record)
+                if not self.state.node(record["node_num"]).has_sampler:
+                    self.state.consume_metrics(record["node_num"], record["t"], record)
 
     # ------------------------------------------------------------------ 調査
     def _ssh_base(self) -> list[str]:
@@ -457,9 +523,9 @@ class Monitor:
         return proc.stdout, error, proc.returncode == 0
 
     def _file_specs(self, node: Node) -> str:
-        names = [f"events-{node.num}.jsonl", f"hfl-{node.num}.log"]
+        names = [f"events-{node.num}.jsonl", f"hfl-{node.num}.log", f"metrics-{node.num}.jsonl"]
         if not self.mirror_enabled:
-            tails = (ONCE_EVENTS_TAIL_BYTES, LOG_TAIL_BYTES)
+            tails = (ONCE_EVENTS_TAIL_BYTES, LOG_TAIL_BYTES, METRICS_TAIL_BYTES)
             return " ".join(f"{name}:-{tail}" for name, tail in zip(names, tails))
         return " ".join(f"{name}:{self.store.offset(node.num, name)}" for name in names)
 
@@ -496,6 +562,8 @@ class Monitor:
                 self.state.consume_events(node.num, node.role, parse_event_lines(data))
             elif name == log_name:
                 self.state.consume_log(node.num, data)
+            elif name == f"metrics-{node.num}.jsonl":
+                self.state.consume_sampler_records(node.num, parse_event_lines(data))
 
     def _record_metrics(self, node: Node, t: float, metrics: dict[str, Any], alive: bool,
                         rss_mb: int | None) -> None:
@@ -504,6 +572,8 @@ class Monitor:
             "node": node.id, "node_num": node.num, "alive": alive, "rss_mb": rss_mb,
             **metrics,
         }
+        if self.state.node(node.num).has_sampler:
+            return  # Jetson 側の記録 (5秒ごと) を使う
         self.state.consume_metrics(node.num, t, record)
         if self.mirror_enabled:
             with open(self.metrics_path, "a", encoding="utf-8") as f:
@@ -526,6 +596,9 @@ class Monitor:
             "current_round": state.last_round,
             "last_loss": state.last_loss, "last_accuracy": state.last_accuracy,
             "metrics": state.metrics, "log_tail": state.log_tail,
+            "activity": describe(node.role, state.proc_events),
+            "sampler_alive": None,
+            "net": self._net_status(node.num),
         }
         if state.last_event is not None:
             status["last_event"] = {
@@ -554,14 +627,30 @@ class Monitor:
         status["loadavg"] = fields.get("LOAD") or None
         status["disk_free_mb"] = _int(fields.get("DISK"))
         status["stop_requested"] = fields.get("STOP") == "1"
+        if fields.get("SAMPLER") in ("0", "1"):
+            status["sampler_alive"] = fields["SAMPLER"] == "1"
         last_t = (state.last_event or {}).get("t")
         if isinstance(last_t, (int, float)):
             status["last_event_age_s"] = round(remote_t - float(last_t), 1)
         metrics = parse_metrics(probe)
         self._record_metrics(node, local_mid, metrics, status["alive"], status["rss_mb"])
         status["metrics"] = state.metrics
+        status["net"] = self._net_status(node.num)
         status["state"] = self._state(status)
         return status
+
+    def _net_status(self, num: int) -> dict[str, Any] | None:
+        net = ((self.state.node(num).metrics or {}).get("net")) or None
+        if not net or not isinstance(net.get("tx_bytes"), int):
+            return None
+        tx_rate, rx_rate = self.state.net_rates(num)
+        return {
+            "tx_bytes": net["tx_bytes"], "rx_bytes": net.get("rx_bytes"),
+            "tx_rate_bps": round(tx_rate, 1) if tx_rate is not None else None,
+            "rx_rate_bps": round(rx_rate, 1) if rx_rate is not None else None,
+            "links": net.get("links") or {},
+            "iface": net.get("iface"),
+        }
 
     def _state(self, s: dict[str, Any]) -> str:
         last = s.get("last_event") or {}
@@ -570,7 +659,12 @@ class Monitor:
                 return "error"
             age = s.get("last_event_age_s")
             stale_after = STALE_FACTOR * self.state.expected_round_s()
-            if age is not None and age > stale_after and last.get("event") != "start":
+            waiting = (
+                self.state.next_round_t is not None
+                and time.time() < self.state.next_round_t + DEFAULT_ROUND_S
+            )
+            if (age is not None and age > stale_after and last.get("event") != "start"
+                    and not waiting):
                 return "stale"
             return "running"
         if last.get("event") == "stop" and s.get("exit_code") in (0, None):
@@ -644,7 +738,16 @@ class Monitor:
                 "resumes": len(state.resumes),
                 "downtime_s": round(downtime, 1),
                 "total_power_w": _total_power_w(nodes),
+                "total_tx_bytes": _total(nodes, "tx_bytes"),
+                "total_rx_bytes": _total(nodes, "rx_bytes"),
+                "total_tx_rate_bps": _total(nodes, "tx_rate_bps"),
+                "round_interval_s": state.round_interval_s,
+                "next_round_t": state.next_round_t,
             },
+            "timeline": state.timeline.latest(
+                {n["num"]: n for n in nodes},
+                {n["num"]: n["clock_offset_s"] for n in nodes if n["clock_offset_s"] is not None},
+            ),
             "alerts": self._alerts(nodes),
             "nodes": nodes,
             "global_series": state.global_series,
@@ -664,6 +767,13 @@ class Monitor:
         if offsets:
             _replace_text(self.out_dir / "clock_offsets.json", json.dumps(offsets, indent=1))
         _replace_text(self.out_dir / "status.json", json.dumps(status, ensure_ascii=False))
+
+
+def _total(nodes: list[dict[str, Any]], key: str) -> float | None:
+    """全ノードの通信量の合計 (Jetson 側の記録があるノードだけ)。"""
+    values = [(n.get("net") or {}).get(key) for n in nodes]
+    values = [v for v in values if v is not None]
+    return round(sum(values), 1) if values else None
 
 
 def _total_power_w(nodes: list[dict[str, Any]]) -> float | None:
@@ -710,6 +820,18 @@ def _metric(n: dict[str, Any], group: str, key: str) -> Any:
     return ((n.get("metrics") or {}).get(group) or {}).get(key)
 
 
+def _tx(n: dict[str, Any]) -> str:
+    value = (n.get("net") or {}).get("tx_bytes")
+    return "-" if value is None else _bytes(value)
+
+
+def _bytes(value: float) -> str:
+    for unit, size in (("GB", 1e9), ("MB", 1e6), ("KB", 1e3)):
+        if value >= size:
+            return f"{value / size:.1f}{unit}"
+    return f"{value:.0f}B"
+
+
 def _power_w(n: dict[str, Any]) -> float | None:
     milliwatts = _metric(n, "power_mw", "VDD_IN")
     return None if milliwatts is None else milliwatts / 1000.0
@@ -730,6 +852,7 @@ TABLE_COLUMNS: list[tuple[str, int, Callable[[dict[str, Any]], str]]] = [
     ("AGE", 6, lambda n: _cell(n["last_event_age_s"], "{:.0f}s")),
     ("POWER", 6, lambda n: _cell(_power_w(n), "{:.1f}W")),
     ("TEMP", 6, lambda n: _cell(_metric(n, "temp_c", "tj"), "{:.0f}C")),
+    ("TX", 9, lambda n: _tx(n)),
     ("CLOCK", 7, lambda n: _cell(n["clock_offset_s"], "{:+.1f}s")),
     ("TB", 3, lambda n: str(n["traceback_count"])),
 ]
@@ -796,8 +919,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    page = Path(__file__).resolve().parent / "monitor" / "index.html"
-    shutil.copyfile(page, out_dir / "index.html")
+    # 監視画面 (index.html・viz.js など) を一式コピーして配信する
+    shutil.copytree(Path(__file__).resolve().parent / "monitor", out_dir, dirs_exist_ok=True)
     print(f"[monitor] run_id={run_id} loading mirror from {out_dir} ...", flush=True)
     monitor = Monitor(inventory, run_id, out_dir, interval=args.interval, identity=args.identity)
     port = args.port or inventory.monitor_port

@@ -12,6 +12,11 @@ Usage:
 --checkpoint (または環境変数 HFL_CHECKPOINT) を指定すると、server.checkpoint_every
 ラウンドごとと停止時に Global モデルを保存する。--resume を付けるとそのチェックポイントの
 続きから再開する。ラウンド番号 (global_round) は通しで続き、時間上限は最初の開始時刻から数える。
+
+server.round_interval_s (dry-run では dry_run.round_interval_s) を指定すると、2ラウンド目以降は
+その間隔で学習する (server.round_align: clock なら毎時 0, 10, 20 … 分のように時計にそろえる)。
+--round-interval で一時的に短くできる (YAML の値より長くはできない。Edge の待ち時間の検証が
+YAML の値で行われるため)。
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ from src.utils.config import load_yaml, resolve_device
 from src.utils.events import EventLogger, get_event_logger
 from src.utils.logger import get_logger
 from src.utils.process import run_main
+from src.utils.schedule import round_interval_from_config
 
 logger = get_logger("global_server")
 
@@ -128,6 +134,17 @@ def _build_evaluate_fn(model, testloader, device, event_logger, clock):
     return evaluate_fn
 
 
+def _on_wait(event_logger: EventLogger, global_round: int, next_t: float, wait_s: float) -> None:
+    """次のラウンドまでの待機を記録する (監視画面の「待機（次 HH:MM）」表示に使う)。"""
+    logger.info(
+        f"Waiting {wait_s:.0f}s for round {global_round} "
+        f"(starts at {time.strftime('%H:%M:%S', time.localtime(next_t))})"
+    )
+    event_logger.emit(
+        "wait", global_round=global_round, next_round_t=round(next_t, 3), wait_s=round(wait_s, 1)
+    )
+
+
 def _resolve_max_hours(args_max_hours: float | None, srv_cfg: dict) -> float | None:
     if args_max_hours is not None:
         return args_max_hours
@@ -148,6 +165,10 @@ def main() -> None:
         help="Global モデルの保存先 (.npz)。既定: 環境変数 HFL_CHECKPOINT",
     )
     parser.add_argument("--resume", action="store_true", help="チェックポイントの続きから再開")
+    parser.add_argument(
+        "--round-interval", type=float, default=None,
+        help="ラウンド間隔 (秒) を一時的に短くする。YAML の round_interval_s 以下のみ",
+    )
     args = parser.parse_args()
     event_logger = get_event_logger("global")
     started_at = time.monotonic()
@@ -170,6 +191,15 @@ def main() -> None:
         )
         max_hours = _resolve_max_hours(args.max_hours, srv_cfg)
         stop_file = os.environ.get("HFL_STOP_FILE") or None
+        round_interval = round_interval_from_config(cfg)
+        if args.round_interval is not None:
+            if round_interval is None or args.round_interval > round_interval:
+                raise ValueError(
+                    f"--round-interval {args.round_interval} must not exceed the configured "
+                    f"round_interval_s={round_interval} (Edges validate their timeouts against it)"
+                )
+            round_interval = args.round_interval or None
+        align_to_clock = srv_cfg.get("round_align", "clock") == "clock"
 
         # --- モデル ---
         model_cfg = cfg.get("model", {})
@@ -193,6 +223,12 @@ def main() -> None:
                     f"--resume requires an existing checkpoint (got {args.checkpoint!r})"
                 )
             ckpt_params, ckpt_meta = load_checkpoint(args.checkpoint)
+            if ckpt_meta.get("config") and ckpt_meta["config"] != args.config:
+                # 別プロファイルで再開すると、間隔やタイムアウトが黙って変わってしまう
+                raise ValueError(
+                    f"checkpoint was written with --config {ckpt_meta['config']}, "
+                    f"but this resume uses {args.config} (pass the same --profile)"
+                )
             validate_parameters(model, ckpt_params)
             set_parameters(model, ckpt_params)
             offset = int(ckpt_meta["global_round"])
@@ -224,6 +260,8 @@ def main() -> None:
             stop_file=stop_file,
             checkpoint=args.checkpoint,
             resume_from_round=offset if args.resume else None,
+            round_interval_s=round_interval,
+            round_align="clock" if align_to_clock else "none",
             dry_run=dry_run,
         )
 
@@ -286,10 +324,16 @@ def main() -> None:
             stop_file=stop_file,
             on_round_start=clock.round_start,
             on_round_end=checkpointer.on_round_end,
+            round_interval_s=round_interval,
+            align_to_clock=align_to_clock,
+            on_wait=lambda server_round, next_t, wait_s: _on_wait(
+                event_logger, server_round + offset, next_t, wait_s
+            ),
         )
         logger.info(
             f"Starting Global Server on {address} "
             f"(rounds={remaining_rounds}, from_round={offset + 1}, max_hours={max_hours}, "
+            f"round_interval={round_interval}, align_to_clock={align_to_clock}, "
             f"checkpoint={args.checkpoint}, stop_file={stop_file}, dry_run={dry_run})"
         )
         fl.server.start_server(

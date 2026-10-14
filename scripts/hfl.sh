@@ -19,6 +19,7 @@ RUN_ID="${HFL_RUN_ID:-}"
 NUM=""
 DRY_RUN=0
 MAX_HOURS=""
+ROUND_INTERVAL=""
 RESUME=0
 FORCE=0
 IDENTITY="${HFL_SSH_KEY:-}"
@@ -36,7 +37,8 @@ Usage: scripts/hfl.sh <command> [NUM] [options]
 このノードで実行するコマンド (NUM 省略時は自ホストの IP から判定):
   start   [NUM]   役割 (global / edge / leaf) をバックグラウンドで起動
   stop    [NUM]   停止 (global はラウンド境界で正常停止 → 配下へ連鎖。他は即時。--force で即時)
-  status  [NUM]   プロセス・待受ポート・最終イベントを表示
+  status  [NUM]   プロセス・待受ポート・最終イベント・記録プロセスを表示
+  sampler-stop [NUM]  Jetson 側の記録プロセス (電力・温度・通信量) を止める (stop-all が呼ぶ)
 
 全ノードに対して SSH で実行するコマンド (.201 や PC から):
   start-all       親→子の順に全ノードを起動 (親の待受を確認してから子を起動)
@@ -56,6 +58,7 @@ Options:
   --dry-run         疎通確認モード (dummy データ・2ラウンド)
   --max-hours H     Global の時間上限 (YAML の max_duration_hours を上書き。再開後も最初の開始から数える)
   --resume          start / start-all で Global をチェックポイントの続きから起動
+  --round-interval S  Global の学習間隔を一時的に短くする (YAML の round_interval_s 以下)
   --force           stop で正常停止を待たずに即時終了
   --identity FILE   SSH 秘密鍵 (環境変数 HFL_SSH_KEY でも可)
   --out DIR         collect の出力先
@@ -83,6 +86,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run) DRY_RUN=1; shift ;;
         --max-hours) MAX_HOURS="$2"; shift 2 ;;
         --resume) RESUME=1; shift ;;
+        --round-interval) ROUND_INTERVAL="$2"; shift 2 ;;
         --force) FORCE=1; shift ;;
         --identity) IDENTITY="$2"; shift 2 ;;
         --out) OUT_DIR="$2"; shift 2 ;;
@@ -182,6 +186,54 @@ group_rss_mb() {
 }
 
 # ---------------------------------------------------------------------------
+# Jetson 側の記録プロセス (scripts/hfl_sampler.py)
+# 台帳に sampler_interval_s がある profile だけで使う。学習とは別に動き、学習が落ちても
+# 記録を続ける。stop / stop --force (resume の片付け) は触らず、stop-all が最後に止める。
+# ---------------------------------------------------------------------------
+sampler_pid_ok() {  # sampler_pid_ok PID RUN_ID: そのPIDがこの run の記録プロセスか
+    local pid="$1" run="$2"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || return 1
+    # 電源断後の再起動で同じ PID が別のプロセスに使われていないか、コマンドラインで確かめる
+    tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q "hfl_sampler.py .*--run-id $run "
+}
+
+start_sampler() {
+    [[ -n "$HFL_SAMPLER_INTERVAL_S" ]] || return 0
+    local pidfile="logs/$RUN_ID/sampler-$NUM.pid" pid other
+    pid="$(cat "$pidfile" 2>/dev/null || true)"
+    if sampler_pid_ok "$pid" "$RUN_ID"; then
+        log "sampler already running (pid=$pid)"
+        return 0
+    fi
+    # 1台に記録プロセスは1つ: 別の run のものが残っていれば止める
+    for other in $(pgrep -f '[h]fl_sampler.py' || true); do
+        log "stopping a sampler of another run (pid=$other)"
+        kill "$other" 2>/dev/null || true
+    done
+    local launcher=(bash -c 'echo $$ > "$1"; shift; exec "$@"' _ "$pidfile"
+                    "$PY" scripts/hfl_sampler.py --profile "$PROFILE" --run-id "$RUN_ID"
+                    --node-num "$NUM" --interval "$HFL_SAMPLER_INTERVAL_S")
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "${launcher[@]}" >> "logs/$RUN_ID/sampler-$NUM.log" 2>&1 < /dev/null &
+    else
+        "${launcher[@]}" >> "logs/$RUN_ID/sampler-$NUM.log" 2>&1 < /dev/null &
+    fi
+    sleep 1
+    log "sampler started (pid=$(cat "$pidfile" 2>/dev/null), every ${HFL_SAMPLER_INTERVAL_S}s -> logs/$RUN_ID/metrics-$NUM.jsonl)"
+}
+
+cmd_sampler_stop() {
+    require_num
+    current_run_id
+    local pid; pid="$(cat "logs/$RUN_ID/sampler-$NUM.pid" 2>/dev/null || true)"
+    if sampler_pid_ok "$pid" "$RUN_ID"; then
+        kill "$pid" && log "node $NUM: sampler stopped (pid=$pid)"
+    else
+        log "node $NUM: sampler is not running"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # このノードで実行するコマンド
 # ---------------------------------------------------------------------------
 cmd_start() {
@@ -196,11 +248,13 @@ cmd_start() {
     echo "$RUN_ID" > logs/current_run
     rm -f "logs/$RUN_ID/STOP" "logs/$RUN_ID/hfl-$NUM.exit"
     git rev-parse --short HEAD > "logs/$RUN_ID/revision" 2>/dev/null || true
+    start_sampler
 
     local cmd_flags=()
     [[ "$DRY_RUN" == 1 ]] && cmd_flags+=(--dry-run)
     [[ -n "$MAX_HOURS" ]] && cmd_flags+=(--max-hours "$MAX_HOURS")
     [[ "$RESUME" == 1 ]] && cmd_flags+=(--resume)
+    [[ -n "$ROUND_INTERVAL" ]] && cmd_flags+=(--round-interval "$ROUND_INTERVAL")
     local cmd=()
     mapfile -t cmd < <(nodes command "$NUM" "${cmd_flags[@]}")
 
@@ -296,6 +350,14 @@ cmd_status() {
     fi
     local logfile="logs/$RUN_ID/hfl-$NUM.log"
     [[ -f "$logfile" ]] && echo "last log: $(tail -n 1 "$logfile" | cut -c1-200)"
+    if [[ -n "$HFL_SAMPLER_INTERVAL_S" ]]; then
+        local spid; spid="$(cat "logs/$RUN_ID/sampler-$NUM.pid" 2>/dev/null || true)"
+        if sampler_pid_ok "$spid" "$RUN_ID"; then
+            echo "sampler: running pid=$spid (logs/$RUN_ID/metrics-$NUM.jsonl)"
+        else
+            echo "sampler: NOT running"
+        fi
+    fi
     return 0
 }
 
@@ -366,6 +428,7 @@ cmd_start_all() {
     [[ "$DRY_RUN" == 1 ]] && flags+=(--dry-run)
     [[ -n "$MAX_HOURS" ]] && flags+=(--max-hours "$MAX_HOURS")
     [[ "$RESUME" == 1 ]] && flags+=(--resume)
+    [[ -n "$ROUND_INTERVAL" ]] && flags+=(--round-interval "$ROUND_INTERVAL")
     mkdir -p logs; echo "$RUN_ID" > logs/current_run
     for num in $HFL_NODE_NUMS; do
         log "== node $num (${NODE_ROLE[$num]} ${NODE_ID[$num]})"
@@ -439,6 +502,13 @@ cmd_stop_all() {
     for num in $HFL_NODE_NUMS; do
         echo "  node $num: exit=$(remote "$num" "cat logs/$RUN_ID/hfl-$num.exit 2>/dev/null" || true)"
     done
+    if [[ -n "$HFL_SAMPLER_INTERVAL_S" ]]; then
+        log "stopping the Jetson-side samplers"
+        for num in $HFL_NODE_NUMS; do
+            remote_hfl "$num" "sampler-stop $num --profile $PROFILE --run-id $RUN_ID" \
+                || log "node $num: sampler-stop failed"
+        done
+    fi
     log "stop-all done (run_id=$RUN_ID)"
 }
 
@@ -529,6 +599,7 @@ case "$COMMAND" in
     start-all) cmd_start_all ;;
     stop-all) cmd_stop_all ;;
     resume) cmd_resume ;;
+    sampler-stop) cmd_sampler_stop ;;
     status-all) cmd_status_all ;;
     wait) cmd_wait ;;
     collect) cmd_collect ;;

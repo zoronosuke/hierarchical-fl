@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HFL Replay</title>
+<!-- 再生ページ (動画用)。scripts/build_replay.py が replay-data.js を作る。ファイルを直接開いてよい。
+     ?autoplay=1 自動再生 / ?clean=1 操作パネルを隠す (画面録画用) / ?seconds=20 再生時間 -->
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+    --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #4a3aa7; --s8: #e34948;
+    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+      --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1320px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 0; }
+  .head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin-bottom: 10px; }
+  .clock { font-size: 15px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .tile .label { color: var(--ink-2); font-size: 12px; }
+  .tile .value { font-size: 28px; font-weight: 600; line-height: 1.2; font-variant-numeric: tabular-nums; }
+  .tile .value small { font-size: 13px; font-weight: 400; color: var(--muted); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+  .card h2 { font-size: 14px; margin: 0 0 8px; color: var(--ink-2); font-weight: 600; }
+  .charts { display: grid; grid-template-columns: 1fr; gap: 12px; }
+  @media (min-width: 900px) { .charts.two { grid-template-columns: 1fr 1fr; } }
+  canvas { width: 100%; height: 220px; display: block; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--ink-2); margin-top: 6px; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; vertical-align: -1px; margin-right: 6px; }
+  .controls { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .controls button { font: inherit; padding: 4px 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); cursor: pointer; }
+  .controls input[type=range] { flex: 1; }
+  .muted { color: var(--muted); }
+  body.clean .controls { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <div class="head">
+    <h1>階層型連合学習（5段・Jetson 7台）</h1>
+    <span class="clock" id="clock"></span>
+  </div>
+  <div class="controls">
+    <button id="play">▶ 再生</button>
+    <input type="range" id="slider" min="0" value="0">
+    <span class="muted" id="pos"></span>
+  </div>
+  <div class="tiles">
+    <div class="tile"><div class="label">Global ラウンド</div><div class="value" id="t-round">–</div></div>
+    <div class="tile"><div class="label">Global accuracy</div><div class="value" id="t-acc">–</div></div>
+    <div class="tile"><div class="label">Global loss</div><div class="value" id="t-loss">–</div></div>
+    <div class="tile"><div class="label">合計送信量（全ノード）</div><div class="value" id="t-tx">–</div></div>
+    <div class="tile"><div class="label">合計消費電力 (VDD_IN)</div><div class="value" id="t-power">–</div></div>
+  </div>
+  <div class="card"><h2>トポロジー（太線 = 通信中、↓配布 ↑返送）</h2><div id="topology"></div></div>
+  <div class="charts two">
+    <div class="card"><h2>Global accuracy</h2><canvas id="c-acc"></canvas></div>
+    <div class="card"><h2>各ノードの Global ラウンド進行</h2><canvas id="c-rounds"></canvas><div class="legend" id="legend-rounds"></div></div>
+  </div>
+  <div class="charts two">
+    <div class="card"><h2>累計送信量（ノード別）</h2><canvas id="c-tx"></canvas><div class="legend" id="legend-tx"></div></div>
+    <div class="card"><h2>消費電力 VDD_IN（W）</h2><canvas id="c-power"></canvas><div class="legend" id="legend-power"></div></div>
+  </div>
+</main>
+<script src="viz.js"></script>
+<script src="replay-data.js"></script>
+<script>
+(() => {
+  const V = window.HFLViz, D = window.REPLAY;
+  const $ = (id) => document.getElementById(id);
+  const params = new URLSearchParams(location.search);
+  if (params.get('clean') === '1') document.body.classList.add('clean');
+  const seconds = parseFloat(params.get('seconds') || D.seconds || 15);
+  const frames = D.frames, nSteps = frames.length ? frames[0].steps.length : 1;
+  const xMin = D.range.t_from, xMax = D.range.t_to;
+  const gap = Math.max(300, 2 * (D.round_interval_s || 0));
+  $('slider').max = String(frames.length - 1);
+
+  const colorOf = new Map(D.nodes.map((n, i) => [n.num, V.seriesColor(i)]));
+  const named = (src, k) => D.nodes.map(n => ({ name: `${n.num} ${n.id}`, color: colorOf.get(n.num), all: (src[String(n.num)] || []).map(p => [p[0], p[k]]) }));
+  const roundSeries = named(D.round_series, 1), txSeries = named(D.metric_series, 3), powerSeries = named(D.metric_series, 1);
+  V.legendTo($('legend-rounds'), roundSeries); V.legendTo($('legend-tx'), txSeries); V.legendTo($('legend-power'), powerSeries);
+  const upTo = (series, t) => series.map(s => ({ ...s, points: s.all.filter(p => p[0] <= t) }));
+
+  function drawCharts(frame) {
+    const t = frame.t;
+    const acc = D.global_series.filter(p => p[0] <= t).map(p => [p[0], p[1], p[3]]);
+    const spans = D.outages || [];
+    V.drawLines($('c-acc'), [{ name: 'accuracy', color: V.css('--s1'), points: acc }], { yMin: 0, yMax: 1, yFmt: v => v.toFixed(1), xMin, xMax, gap, spans });
+    V.drawLines($('c-rounds'), upTo(roundSeries, t), { step: true, zero: true, yFmt: v => Math.round(v).toString(), xMin, xMax, gap, spans });
+    V.drawLines($('c-tx'), upTo(txSeries, t), { zero: true, yFmt: v => V.fmtBytes(v), xMin, xMax, step: true, spans });
+    V.drawLines($('c-power'), upTo(powerSeries, t), { zero: true, yFmt: v => v.toFixed(1), xMin, xMax, spans });
+  }
+
+  function drawStep(fi, si) {
+    const frame = frames[fi], step = frame.steps[si];
+    const nodes = D.nodes.map(n => {
+      const info = frame.nodes[String(n.num)] || {};
+      return { num: n.num, id: n.id, role: n.role, parent: n.parent, state: 'running', activity: step[String(n.num)],
+               current_round: info.round, power_w: info.power_w, temp_c: info.temp_c, links: info.links };
+    });
+    // 子が学習中・返送中なら、その親子の線を通信中として強調する
+    const active = new Set(D.nodes.filter(n => n.parent != null && ['train', 'aggregate'].includes((step[String(n.num)] || {}).phase)).map(n => n.num));
+    V.renderTopology($('topology'), nodes, active);
+    $('t-round').textContent = frame.round;
+    $('t-acc').textContent = V.fmt(frame.accuracy, 4);
+    $('t-loss').textContent = V.fmt(frame.loss, 4);
+    const tx = Object.values(frame.nodes).map(n => n.tx_bytes).filter(v => v != null);
+    const power = Object.values(frame.nodes).map(n => n.power_w).filter(v => v != null);
+    $('t-tx').textContent = tx.length ? V.fmtBytes(tx.reduce((a, b) => a + b, 0)) : '–';
+    $('t-power').innerHTML = power.length ? `${power.reduce((a, b) => a + b, 0).toFixed(1)}<small> W</small>` : '–';
+    $('clock').textContent = `${V.fmtDateTime(frame.t)}　ラウンド ${D.range.from_round}〜${D.range.to_round} を ${seconds} 秒で再生`;
+    $('pos').textContent = `${fi + 1} / ${frames.length}`;
+    $('slider').value = String(fi);
+  }
+
+  let playing = false, startedAt = 0, startFrame = 0, shownFrame = -1, shownStep = -1;
+  function show(fi, si) {
+    if (fi !== shownFrame) { drawCharts(frames[fi]); shownFrame = fi; }
+    drawStep(fi, si); shownStep = si;
+  }
+  function tick(now) {
+    if (!playing) return;
+    const perFrame = seconds * 1000 / frames.length;
+    const pos = startFrame + (now - startedAt) / perFrame;
+    const fi = Math.min(Math.floor(pos), frames.length - 1);
+    const si = Math.min(Math.floor((pos - Math.floor(pos)) * nSteps), nSteps - 1);
+    show(fi, fi === frames.length - 1 && pos >= frames.length ? nSteps - 1 : si);
+    if (pos >= frames.length) { playing = false; $('play').textContent = '▶ 再生'; return; }
+    requestAnimationFrame(tick);
+  }
+  function play() {
+    if (shownFrame >= frames.length - 1) shownFrame = -1;
+    startFrame = Math.max(shownFrame, 0); startedAt = performance.now(); playing = true;
+    $('play').textContent = '⏸ 一時停止'; requestAnimationFrame(tick);
+  }
+  $('play').addEventListener('click', () => { if (playing) { playing = false; $('play').textContent = '▶ 再生'; } else play(); });
+  $('slider').addEventListener('input', (e) => { playing = false; $('play').textContent = '▶ 再生'; show(parseInt(e.target.value, 10), nSteps - 1); });
+  window.addEventListener('resize', () => { const fi = Math.max(shownFrame, 0); shownFrame = -1; show(fi, Math.max(shownStep, 0)); });
+  // ?frame=N&step=S でその時点を表示 (静止画の確認用)
+  const f0 = Math.min(parseInt(params.get('frame') || '0', 10), frames.length - 1);
+  show(f0, Math.min(parseInt(params.get('step') || '0', 10), nSteps - 1));
+  if (params.get('autoplay') === '1') setTimeout(play, 800);
+  window.replayShow = (fi, si) => { playing = false; show(fi, si); };  // 自動撮影用
+})();
+</script>
+</body>
+</html>

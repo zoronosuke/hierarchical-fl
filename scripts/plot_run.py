@@ -18,12 +18,15 @@ clock_offsets.json (scripts/hfl.sh collect が書く) があれば t_corrected =
     fit_duration.png             各ノードの fit 所要時間 vs 時刻
     round_duration.png           Global ラウンド所要時間 vs 時刻
 
-監視役 (scripts/hfl_monitor.py) のフォルダ logs/<run_id>/monitor を渡すと、ミラーした events と
-metrics.jsonl (電力・温度) も読み、次も出力する:
-    metrics.csv                  電力・温度・メモリをフラット化
+電力・温度・通信量の記録 (Jetson 側の metrics-<NUM>.jsonl、無ければ監視役の metrics.jsonl) が
+あれば、次も出力する。監視役のフォルダ logs/<run_id>/monitor をそのまま渡してもよい:
+    metrics.csv                  電力・温度・メモリ・通信量をフラット化
     power.png                    各ノードの消費電力 (VDD_IN) vs 時刻
     temperature.png              各ノードの温度 (tj) vs 時刻
+    network.png                  各ノードの累計送信量 vs 時刻 (Jetson 側の記録があるとき)
     summary.json の "power"       ノードごとの平均・最大電力 (W)、消費電力量 (Wh)、最高温度
+    summary.json の "network"     ノードごとの送信・受信量、学習の通信 (親へ・子へ) とその他、
+                                 1ラウンドあたりの送信量
 """
 
 from __future__ import annotations
@@ -169,7 +172,22 @@ def outages(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 # これ以上イベントが無ければ、その間ノードが動いていた証拠は無いとみなして線を切る
+# (学習間隔があるときは、その2倍まで待つ: silent_gap_s())
 SILENT_GAP_S = 300.0
+
+
+def round_interval_s(events: list[dict[str, Any]]) -> float | None:
+    """Global の start イベントに記録された学習間隔 (最後のもの)。"""
+    values = [
+        e.get("round_interval_s") for e in events
+        if e.get("proc") == "global" and e.get("event") == "start"
+    ]
+    values = [v for v in values if v]
+    return float(values[-1]) if values else None
+
+
+def silent_gap_s(events: list[dict[str, Any]]) -> float:
+    return max(SILENT_GAP_S, 2 * (round_interval_s(events) or 0.0))
 
 
 def _with_breaks(
@@ -212,18 +230,68 @@ def _session_breaks(events: list[dict[str, Any]], key: NodeKey) -> list[float]:
 METRIC_MAX_GAP_S = 120.0
 
 
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    records = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # 電源断で途中まで書かれた行
+        if isinstance(record.get("t"), (int, float)):
+            records.append(record)
+    return records
+
+
 def load_metrics(root: Path) -> list[dict[str, Any]]:
+    """電力・温度・通信量。Jetson 側の記録 (metrics-<NUM>.jsonl、5秒ごと) を優先し、
+    それが無いノードだけ監視役の記録 (metrics.jsonl、15秒ごと) を使う。"""
     records: list[dict[str, Any]] = []
+    sampled_nodes = set()
+    for path in sorted(root.rglob("metrics-*.jsonl")):
+        node_records = _read_jsonl(path)
+        records += node_records
+        sampled_nodes |= {r.get("node_num") for r in node_records}
     for path in sorted(root.rglob("metrics.jsonl")):
-        for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(record.get("t"), (int, float)):
-                records.append(record)
+        records += [r for r in _read_jsonl(path) if r.get("node_num") not in sampled_nodes]
     records.sort(key=lambda r: (r["t"], str(r.get("node_num"))))
     return records
+
+
+def summarize_network(records: list[dict[str, Any]], rounds: int) -> dict[str, Any] | None:
+    """ノードごとの送信・受信量 (記録開始から)、学習の通信 (親へ・子へ) とその他。"""
+    last: dict[NodeKey, dict[str, Any]] = {}
+    for record in records:
+        net = record.get("net") or {}
+        if isinstance(net.get("tx_bytes"), int):
+            last[metric_key(record)] = net
+    if not last:
+        return None
+    nodes = {}
+    for key in sorted(last, key=lambda k: str(k[0])):
+        net = last[key]
+        links = net.get("links") or {}
+        fl_sent = sum(v.get("sent", 0) for v in links.values())
+        fl_recv = sum(v.get("recv", 0) for v in links.values())
+        nodes[node_label(key)] = {
+            "iface": net.get("iface"),
+            "tx_bytes": net["tx_bytes"],
+            "rx_bytes": net.get("rx_bytes"),
+            "fl_sent_bytes": fl_sent,
+            "fl_recv_bytes": fl_recv,
+            "other_tx_bytes": max(net["tx_bytes"] - fl_sent, 0),
+            "links": links,
+            "tx_bytes_per_round": round(net["tx_bytes"] / rounds) if rounds else None,
+        }
+    total_tx = sum(n["tx_bytes"] for n in nodes.values())
+    return {
+        "note": "tx/rx = 有線LANの口の実際の送受信量 (記録開始から)。links = 学習の接続ごと "
+                "(TCP の中身)。other_tx = tx - 学習の送信 (TCP/IP のヘッダ・SSH・監視など)",
+        "total_tx_bytes": total_tx,
+        "total_rx_bytes": sum(n["rx_bytes"] or 0 for n in nodes.values()),
+        "total_tx_bytes_per_round": round(total_tx / rounds) if rounds else None,
+        "rounds": rounds,
+        "nodes": nodes,
+    }
 
 
 def metric_key(record: dict[str, Any]) -> NodeKey:
@@ -276,6 +344,13 @@ def write_metrics_csv(records: list[dict[str, Any]], path: Path) -> None:
         for group in ("power_mw", "temp_c"):
             for name, value in (record.get(group) or {}).items():
                 row[f"{group}.{name}"] = value
+        net = record.get("net") or {}
+        for name in ("iface", "tx_bytes", "rx_bytes"):
+            if name in net:
+                row[f"net.{name}"] = net[name]
+        for link, value in (net.get("links") or {}).items():
+            row[f"net.links.{link}.sent"] = value.get("sent")
+            row[f"net.links.{link}.recv"] = value.get("recv")
         rows.append(row)
     columns: list[str] = []
     for row in rows:
@@ -413,6 +488,7 @@ def make_plots(
         written.append(path)
 
     spans = outages(events)
+    gap = silent_gap_s(events)
 
     def shade_outages(ax) -> None:
         for i, span in enumerate(spans):
@@ -435,7 +511,7 @@ def make_plots(
         pts = node_points(n, None, "global_round")
         if not pts:
             continue
-        ts, ys = _with_breaks(pts, _session_breaks(events, n), max_gap=SILENT_GAP_S)
+        ts, ys = _with_breaks(pts, _session_breaks(events, n), max_gap=gap)
         xs = to_dt(ts)
         ax.step(xs, ys, where="post", color=color_of[n], label=node_label(n))
         ax.plot(xs[-1:], ys[-1:], "o", ms=7, color=color_of[n], mec=SURFACE, mew=1.5)
@@ -531,6 +607,9 @@ def make_plots(
             ("power.png", "Power per node (VDD_IN)", "W", _vdd_in_w),
             ("temperature.png", "Temperature per node (tj)", "deg C",
              lambda r: (r.get("temp_c") or {}).get("tj")),
+            ("network.png", "Cumulative bytes sent per node (wired LAN)", "MB",
+             lambda r: ((r.get("net") or {}).get("tx_bytes") or 0) / 1e6
+             if isinstance((r.get("net") or {}).get("tx_bytes"), int) else None),
         ):
             fig, ax = plt.subplots(figsize=(11, 5))
             for i, key in enumerate(metric_nodes):
@@ -541,6 +620,8 @@ def make_plots(
                 if not pts:
                     continue
                 ts, ys = _with_breaks(pts, [], max_gap=SILENT_GAP_S)
+                if not ts:
+                    continue
                 color = color_of.get(key, SERIES[i % len(SERIES)])
                 ax.plot(to_dt(ts), ys, color=color, lw=1.2, label=node_label(key))
             shade_outages(ax)
@@ -573,6 +654,9 @@ def main(argv: list[str] | None = None) -> int:
     if metrics:
         write_metrics_csv(metrics, out / "metrics.csv")
         summary["power"] = summarize_metrics(metrics)
+        network = summarize_network(metrics, summary["global_rounds_completed"])
+        if network:
+            summary["network"] = network
     (out / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -590,6 +674,19 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"  {label:<14} fits={info['fits']:<6} last_round={info['last_round']:<7} exit={exits}"
         )
+    if summary.get("network"):
+        network = summary["network"]
+        print(
+            f"network: total sent {network['total_tx_bytes'] / 1e9:.3f} GB, "
+            f"{(network['total_tx_bytes_per_round'] or 0) / 1e6:.2f} MB/round"
+        )
+        for label, info in network["nodes"].items():
+            mb = {k: (info[k] or 0) / 1e6 for k in
+                  ("tx_bytes", "rx_bytes", "fl_sent_bytes", "other_tx_bytes")}
+            print(
+                f"  {label:<14} tx={mb['tx_bytes']:.1f} MB rx={mb['rx_bytes']:.1f} MB "
+                f"learning tx={mb['fl_sent_bytes']:.1f} MB other tx={mb['other_tx_bytes']:.1f} MB"
+            )
     if metrics:
         power = summary["power"]
         print(f"power: {len(metrics)} samples, total energy {power['total_energy_wh']} Wh")

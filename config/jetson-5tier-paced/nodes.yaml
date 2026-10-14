@@ -1,0 +1,27 @@
+# =============================================================================
+# Jetson 7台の台帳 (scripts/hfl.sh / hfl_nodes.py / hfl_monitor.py が使う)
+#
+# - ip   = subnet_prefix + num、ssh ユーザー = ssh_user_prefix + 2桁 (num - 200)
+# - Edge の設定ファイルは topology.yaml の edges[id].config_file、
+#   Leaf の partition は data_partition.assignments[id]、
+#   親アドレスは親ノードの ip:port から導く (ここには書かない)
+# - nodes は親→子の順。start-all はこの順に起動し、port を持つノードは
+#   待受を確認してから次へ進む
+# =============================================================================
+
+ssh_user_prefix: "tachilab-orin"
+subnet_prefix: "192.168.10."
+remote_dir: "~/hierarchical-fl-persistent"
+monitor_port: 8000
+defaults_config: "config/defaults.yaml"
+
+sampler_interval_s: 5          # Jetson 側の記録 (電力・温度・メモリ・通信量) の間隔
+
+nodes:
+  - {num: 201, role: global, port: 8080}
+  - {num: 202, role: edge, id: edge_01, port: 9001, parent: 201}
+  - {num: 203, role: edge, id: edge_02, port: 9002, parent: 201}
+  - {num: 204, role: edge, id: leaf_01, port: 9003, parent: 202}
+  - {num: 205, role: leaf, id: leaf_02, parent: 202}
+  - {num: 206, role: edge, id: leaf_03, port: 9004, parent: 204}
+  - {num: 207, role: leaf, id: leaf_04, parent: 206}

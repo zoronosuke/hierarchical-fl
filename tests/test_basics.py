@@ -71,8 +71,10 @@ def test_5tier_configs():
     for config_dir, global_file in (
         ("config/jetson-5tier", "config/jetson-5tier/global.yaml"),
         ("config/jetson-5tier-longrun", "config/jetson-5tier-longrun/global.yaml"),
+        ("config/jetson-5tier-paced", "config/jetson-5tier-paced/global.yaml"),
         ("config/local-5tier", "config/global.yaml"),
         ("config/local-5tier", "config/local-5tier/global_longrun.yaml"),
+        ("config/local-5tier", "config/local-5tier/global_paced.yaml"),
     ):
         global_config = load_yaml(repository / global_file)
         topology = load_yaml(repository / config_dir / "topology.yaml")
@@ -127,6 +129,39 @@ def test_longrun_profile():
         ec = load_yaml(repository / f"config/jetson-5tier-longrun/{name}.yaml")["edge"]
         assert ec["shutdown_timeout"] >= 120
         assert ec["parent_model_timeout"] >= global_config["server"]["round_timeout"] + 600
+
+
+def test_paced_profile():
+    """10分間隔プロファイル: 間隔・毎ラウンド保存・待ち時間の連鎖・自分のファイルを参照。"""
+    from src.utils.config import load_yaml
+    from src.utils.schedule import round_interval_from_config
+
+    repository = Path(__file__).resolve().parents[1]
+    global_config = load_yaml(repository / "config/jetson-5tier-paced/global.yaml")
+    server = global_config["server"]
+    assert server["round_interval_s"] == 600 and server["round_align"] == "clock"
+    assert server["checkpoint_every"] == 1
+    assert 0 < global_config["dry_run"]["round_interval_s"] <= 30  # 疎通確認で長く待たない
+    assert round_interval_from_config(global_config) == 600
+    dry = {**global_config, "mode": "dry_run"}
+    assert round_interval_from_config(dry) == global_config["dry_run"]["round_interval_s"]
+    for name in ("edge_01", "edge_02", "leaf_01", "leaf_03"):
+        ec = load_yaml(repository / f"config/jetson-5tier-paced/{name}.yaml")["edge"]
+        needed = server["round_timeout"] + server["round_interval_s"] + 60
+        assert ec["parent_model_timeout"] > needed
+    nodes = load_yaml(repository / "config/jetson-5tier-paced/nodes.yaml")
+    assert nodes["sampler_interval_s"] == 5
+
+
+def test_profiles_reference_their_own_files():
+    """topology.yaml は自分のディレクトリの Edge 設定を参照する (コピー時の取り違え防止)。"""
+    from src.utils.config import load_yaml
+
+    repository = Path(__file__).resolve().parents[1]
+    for profile in ("jetson-5tier", "jetson-5tier-longrun", "jetson-5tier-paced", "local-5tier"):
+        topology = load_yaml(repository / "config" / profile / "topology.yaml")
+        for edge_id, info in topology["edges"].items():
+            assert info["config_file"].startswith(f"config/{profile}/"), (profile, edge_id)
 
 def test_resolve_device():
     """デバイス解決。"""

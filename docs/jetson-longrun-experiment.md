@@ -1,5 +1,27 @@
 # Jetson 7台による長時間5段HFL実験手順（バッテリー・ソーラー運用）
 
+## 0. 次の実験の手順（10分間隔・`jetson-5tier-paced`）
+
+学習を **10 分に 1 回**（毎時 0, 10, 20 … 分）にして通信量を約 1/33 に抑え、各 Jetson が電力・温度・メモリ・通信量を 5 秒ごとに記録する構成。1 日 144 ラウンドで、精度は約 100 ラウンドで上限（0.76〜0.77）付近に届く。
+
+```bash
+# .201（または PC の Git Bash。PC は export HFL_SSH_KEY=C:/Users/iamzo/.ssh/id_ed25519 を先に）
+cd ~/hierarchical-fl-persistent
+scripts/hfl.sh start-all --profile config/jetson-5tier-paced --run-id paced-YYYYMMDD-01 --dry-run   # 疎通確認 (10秒間隔で2ラウンド)
+scripts/hfl.sh start-all --profile config/jetson-5tier-paced --run-id paced-YYYYMMDD-01             # 本番 (最大48時間)
+```
+
+```powershell
+# 監視 (PC の PowerShell。窓は開いたまま)
+uv run python scripts/hfl_monitor.py --profile config/jetson-5tier-paced --run-id paced-YYYYMMDD-01 --identity C:\Users\iamzo\.ssh\id_ed25519
+```
+
+- **止まったら**: 落ちた Jetson の電源を入れて、`scripts/hfl.sh resume --profile config/jetson-5tier-paced --run-id paced-YYYYMMDD-01`（§9）。**`--profile` は開始時と同じものを付ける**（違うと Global が起動時にエラーで止まる）。
+- **終わったら**: `scripts/hfl.sh stop-all --profile config/jetson-5tier-paced --run-id ...`（各 Jetson の記録プロセスも止まる）。
+- **グラフ**: `uv run python scripts/plot_run.py logs/paced-YYYYMMDD-01/monitor`（PC の監視役のフォルダ。電力量・通信量の集計も出る）。
+- **動画**: `uv run python scripts/build_replay.py logs/paced-YYYYMMDD-01/monitor --profile config/jetson-5tier-paced` → `replay.html` を開いて画面録画（§7）。
+- 試しに短い間隔で動かす: `start-all ... --round-interval 60 --max-hours 0.3`（YAML の 600 秒より長くはできない）。
+
 ## 1. 目的
 
 [5段HFL実験](jetson-5tier-experiment.md)と同じ7台・同じトポロジーのまま、**1日以上動き続けるか**を検証する。
@@ -52,6 +74,19 @@
 ルール: `sub_round_timeout < parent_result_timeout < 直上の round_timeout`、`parent_model_timeout > Global round_timeout + 600`。`parent_model_timeout` の条件は起動時にも検証される（満たさないと `ValueError`）。
 
 短時間の実験には `--profile config/jetson-5tier`（5ラウンド）も同じコマンドで使える。
+
+**10分間隔のプロファイル `config/jetson-5tier-paced/`**（§0）: longrun との違いは次のとおり。
+
+| 項目 | 値 |
+|---|---|
+| `server.round_interval_s` / `round_align` | 600 / clock（毎時 0, 10, … 分に開始。1 ラウンド目と、再開直後の 1 ラウンド目は待たずに始める） |
+| `dry_run.round_interval_s` | 10（疎通確認で長く待たない） |
+| `server.checkpoint_every` | 1（毎ラウンド保存） |
+| `server.max_duration_hours` | 48 |
+| Edge・中継の `parent_model_timeout` | 3600（規則: `> Global round_timeout + round_interval_s + 60`。起動時に検証される。間隔を最大 30 分まで変えても通る） |
+| `nodes.yaml` の `sampler_interval_s` | 5（Jetson 側の記録。これがある profile だけ記録プロセスが動く） |
+
+待機中も Global は1秒ごとに停止要求と時間上限を確認する。時間上限が次のラウンドより先に来るときは、待たずにその場で停止する。
 
 `scripts/hfl.sh check` で台帳と設定ファイルの整合性を検証できる。
 
@@ -137,9 +172,17 @@ scripts/hfl.sh status-all --run-id longrun-20261013-01     # 1回だけ表示（
 scripts/hfl.sh wait       --run-id longrun-20261013-01     # Global 終了までブロック
 ```
 
+### Jetson 側の記録（paced プロファイル）
+
+`hfl.sh start` が学習とは別に `scripts/hfl_sampler.py` を起動し、各 Jetson の `logs/<run-id>/metrics-<NUM>.jsonl` に 5 秒ごとに記録する（行ごとに fsync）。項目: 電力（INA3221: `VDD_IN` ほか）、温度、GPU 使用率、ファン、メモリ、負荷、学習プロセスの生存、通信量。
+
+- **通信量**: `tx_bytes` / `rx_bytes` = 有線 LAN の口（台帳の IP を持つインターフェース）の**実際の送受信量**（記録開始から。Jetson が再起動してもカウンターの戻りを補正して通算する）。`links` = 学習の接続ごとの量（`parent` = 親との接続、`child:<IP>` = 子との接続。`ss` の接続ごとのカウンター）。同じ Jetson 内の通信（Edge と自分の Internal Client）と Wi‑Fi は数えない。SSH などは個別に数えず「その他 = tx − 学習の送信」になる（実測でほぼ 0）。
+- 記録プロセスは学習が落ちても動き続け、`resume` の片付け（`stop --force`）でも止めない（停止中の電力も残る）。`stop-all` が最後に止める。個別に止めるときは `scripts/hfl.sh sampler-stop`。`status` に記録中かどうかが出る。
+- 監視役はこのファイルも差分コピーし、電力・温度・通信量の表示に使う（監視役自身の 15 秒ごとの記録は、Jetson 側の記録が無い run だけ）。
+
 ### ページに出るもの
 
-実験開始時刻、生存台数、Global ラウンド・accuracy・loss、合計消費電力、停止・再開の回数と停止時間、各ノードの状態（稼働中 / 更新停止 / 停止 / 到達不能）・PID・稼働時間・メモリ・**電力・温度**・待受ポート・最新ラウンド・最終更新・時計ずれ・Traceback 数、グラフ（Global accuracy / loss、各ノードのラウンド進行、**消費電力、温度**。5分以上記録が無い区間は線が切れる）、ログ末尾。tj が 85℃ 以上になると警告を出す。
+実験開始時刻・学習間隔、生存台数、Global ラウンド・accuracy・loss、**次のラウンドの時刻**、**合計送信量（全ノード）と送信速度（1 分平均）**、合計消費電力、停止・再開の回数と停止時間、**トポロジー図**（5 段の木。各ノードの枠の色 = 青: 学習中・子の学習待ち / 橙: 集約・返送 / 灰: 待機 / 赤: 異常。枠の中に今していること・ラウンド・電力・温度、Edge には Internal Client の状態。線の横に親子間の累計通信量 ↓配布 ↑返送、太線 = 今通信している親子）、**直近ラウンドのタイムライン**（各ノードの配布〜返送・学習の開始〜終了、時計ずれは補正済み）、各ノードの状態・していること・ラウンド・**送信量・受信量・送信速度**・電力・温度・GPU・メモリ・待受ポート・最終更新・時計ずれ・Traceback 数・記録プロセス、グラフ（Global accuracy / loss、各ノードのラウンド進行、**累計送信量**、消費電力、温度。記録が長く空いた区間は線が切れる）、ログ末尾。tj が 85℃ 以上になると警告を出す。
 
 「サーバが生存を把握できるか」について: Global が直接知るのは直下の Edge 2台だけ。各階層の `aggregate` イベント（誰の結果を集約したか）と各台のプロセス生存を監視が合成して全体像にしている。
 
@@ -184,6 +227,19 @@ uv run python scripts/plot_run.py logs/longrun-20261013-01/monitor
 | `power.png` / `temperature.png` | 各ノードの消費電力（VDD_IN）・温度（tj）。監視役の `metrics.jsonl` があるとき |
 | `metrics.csv` | 電力・温度・メモリを1本にしたもの |
 | `summary.json` の `power` | ノードごとの平均・最大電力（W）、消費電力量（Wh）、最高温度。合計消費電力量 |
+
+Jetson 側の記録があれば `network.png`（各ノードの累計送信量）と、`summary.json` の `network`（ノードごとの送信・受信量、学習の通信（親へ・子へ）とその他、1 ラウンドあたりの送信量）も出る。
+
+### 動画用の再生ページ
+
+```bash
+uv run python scripts/build_replay.py logs/<run-id>/monitor --profile config/jetson-5tier-paced [--seconds 15] [--from-round N --to-round M]
+```
+
+`<入力>/replay/replay.html` をブラウザで開く（ファイルを直接開いてよい）。監視画面と同じ見た目（タイル・トポロジー・グラフ）で、1 コマ = 1 ラウンド、各ラウンドの中は配布 → 学習 → 集約の流れを 4 段階で見せる。範囲を指定しないときは、ラウンド 1 から「精度（5 ラウンド移動平均）が最高値との差 0.01 以内に届くラウンド」まで（最低 20 ラウンド）。
+
+- URL に `?autoplay=1`（開いたら自動再生）、`?clean=1`（操作パネルを隠す）、`?seconds=20`（再生時間）を付けられる。例: `replay.html?autoplay=1&clean=1&seconds=15`
+- 動画にする: ブラウザを全画面（F11）にして、Windows の画面録画（Snipping Tool の「録画」または Win+Alt+R）を開始してからページを再読み込みする。
 
 イベントの形式（JSONL、1行1イベント）。主なフィールド: `ts`（ISO 8601、タイムゾーン付き）、`t`（epoch 秒）、`run_id`、`node`、`node_num`、`host`、`proc`（global / edge / sub_server / internal_client / leaf）、`event`、`global_round`、`parent_round`、`child_round`、`duration_s`、`loss`、`accuracy`、`participants`、`reason`。
 `event` の種類: `start` / `stop` / `error`（全プロセス）、`round_start` / `aggregate` / `eval`（Global と sub-server）、`parent_model_received` / `child_result_sent`（sub-server）、`parent_fit_start` / `parent_fit_end`（Edge）、`fit_start` / `fit_end`（Leaf と Internal）。
@@ -230,6 +286,8 @@ scripts/hfl.sh resume --run-id longrun-20261013-01
 - 時間上限（`--max-hours` / `max_duration_hours`）は、**最初に起動した時刻から**数える。再開しても延びない。
 - 同じ run-id なので、ログと events は同じファイルに追記される（`hfl-<NUM>.log` には `===== [hfl] start ... resume=1 =====` の区切りが入る）。グラフでは止まっていた時間が空白として残り、Global の events に `resume` イベント（`downtime_s` 付き）が記録される。
 - 各 Jetson で手動で再開する場合は、§4 A と同じ順番で `scripts/hfl.sh start --run-id <同じID>` を打つ。**.201 だけ `--resume` を付ける**（付け忘れるとラウンド 1・初期モデルから始まる）。
+- `--profile` は開始時と同じものを付ける。チェックポイントには使った設定ファイルが記録されていて、違う profile で再開すると Global が起動時にエラーで止まる（間隔やタイムアウトが黙って変わらないようにするため）。
+- 学習間隔があるとき、再開直後の 1 ラウンド目は待たずに始まり、2 ラウンド目から時計の区切りに戻る。
 
 ### 注意
 
@@ -261,6 +319,7 @@ uv run python scripts/plot_run.py logs/local-maxhours
 | 起動直後に `Dataset ... not found`（HF offline） | CIFAR-10 のキャッシュが無い。§2 の手順でダウンロード |
 | `stop` しても Global が止まらない | ラウンド境界でしか止まらない。固まっている場合は round_timeout (1500 s) 後に止まる。急ぐなら再度 `stop`（STOP_TIMEOUT 経過後に強制終了） |
 | 監視ページが開けない | `scripts/hfl.sh monitor status`。.201 の UFW で 8000 を開ける: `sudo ufw allow from 192.168.10.0/24 to any port 8000 proto tcp` |
+| 5G で学習中に接続が切れる | Flower は 3 分 30 秒ごとに gRPC の keepalive を送るので、10 分の待機自体では切れない。逆に、5G が 20 秒以上途切れると keepalive の応答が届かず接続が切れ、fail-fast で止まる → `resume`。5G 環境では本番前に `--round-interval 60` などで短い試験をする |
 | 新しい run-id なのに即停止する | 前の `STOP` ファイルが残っている。`start` は同じ run-id の STOP を消すが、別 run-id の場合は無関係 |
 
 ## 12. 2026-10-12 の検証結果（a0aa3f4）

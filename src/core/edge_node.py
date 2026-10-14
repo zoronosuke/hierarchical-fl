@@ -29,8 +29,11 @@ from src.models.nets import (
 from src.utils.config import resolve_device
 from src.utils.events import EventLogger
 from src.utils.logger import get_logger
+from src.utils.schedule import round_interval_from_config
 
 logger = get_logger("edge")
+
+ROUND_INTERVAL_MARGIN_S = 60.0  # Global の評価・チェックポイント保存の時間
 
 
 class EdgeRuntime:
@@ -222,6 +225,20 @@ class EdgeNode(fl.client.NumPyClient):
                 f"[{self.edge_id}] parent_model_timeout={parent_model_timeout} must exceed "
                 f"parent round_timeout={parent_timeout}"
             )
+        # 学習間隔があると、どの段の sub-server も「Global のラウンド時間上限 + 間隔」だけ
+        # 次の親モデルを待つことがある (評価・保存の時間として余裕を足す)
+        round_interval = round_interval_from_config(global_config)
+        if round_interval is not None:
+            global_round_timeout = float(
+                global_config.get("server", {}).get("round_timeout", 300.0)
+            )
+            needed = global_round_timeout + round_interval + ROUND_INTERVAL_MARGIN_S
+            if parent_model_timeout <= needed:
+                raise ValueError(
+                    f"[{self.edge_id}] parent_model_timeout={parent_model_timeout} must exceed "
+                    f"Global round_timeout + round_interval_s + {ROUND_INTERVAL_MARGIN_S:.0f}s"
+                    f"={needed}"
+                )
         self.expected_clients = len(
             topology_config.get("edges", {}).get(self.edge_id, {}).get("leaf_clients", [])
         ) + int(ec.get("internal_client", {}).get("enabled", True))

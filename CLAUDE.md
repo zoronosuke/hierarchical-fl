@@ -30,6 +30,7 @@ uv run ruff check src/                     # lint
 scripts/hfl.sh start|stop|status [NUM]     # Jetson 上で自ノードの役割を1コマンド起動/停止
 scripts/hfl.sh start-all|stop-all|status-all|resume|collect|monitor start   # .201 や PC から7台一括
 uv run python scripts/plot_run.py collected/<run-id>   # 回収した events.jsonl を CSV + PNG に
+uv run python scripts/build_replay.py logs/<run-id>/monitor   # 動画用の再生ページ (replay.html)
 ```
 
 ## Architecture (IMPORTANT)
@@ -41,6 +42,8 @@ uv run python scripts/plot_run.py collected/<run-id>   # 回収した events.jso
 - `uv.lock`の検証済みFlower版とlegacy APIを使用する
 - Global と sub-server は `StoppableServer` (src/core/stoppable_server.py) で動く。Global は時間上限 (`--max-hours` / `server.max_duration_hours`)・停止ファイル (`HFL_STOP_FILE`) で、sub-server は親の切断 (stop_event) でラウンド境界停止 → 配下へ正常な切断通知が連鎖する。シグナルは Flower が握るので使わない
 - Global は `HFL_CHECKPOINT` に `server.checkpoint_every` ごとモデルを保存し、`--resume` で続きから再開する (global_round は通し番号、parent_round は再開ごとに 1 から)
+- `server.round_interval_s` (dry-run は `dry_run.round_interval_s`) があると Global が2ラウンド目以降の開始を待つ (`round_align: clock` で時計の区切り)。Edge は `parent_model_timeout > Global round_timeout + round_interval_s + 60` を起動時に検証
+- 台帳に `sampler_interval_s` がある profile では `hfl.sh start` が `scripts/hfl_sampler.py` (電力・温度・通信量の記録) を学習とは別に起動する。監視役が差分コピーし、`scripts/hfl_activity.py` が各ノードの活動とラウンドのタイムラインを判定 (監視画面・再生ページ共用)
 - エントリーポイントは `run_main` (src/utils/process.py) で包む。Flower は例外時に gRPC スレッドが残りプロセスが終了しないため
 - 各プロセスは `HFL_EVENT_LOG` が設定されていれば JSONL イベント (src/utils/events.py) を追記する。未設定なら no-op
 - 長時間実験の運用は docs/jetson-longrun-experiment.md と scripts/hfl.sh (台帳: config/<profile>/nodes.yaml)
