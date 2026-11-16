@@ -181,8 +181,37 @@ def main() -> int:
         )
         _wait_for_listener(global_process, global_address, args.startup_timeout)
 
+        # flat FL (topology に relays がある): 中継は集約せず子の接続を親へ TCP 転送する。
+        # 親の待受後に起動するため、topology記載順に1台ずつ起動する
+        relays = topology_cfg.get("relays") or {}
+        for relay_id, relay_info in relays.items():
+            relay_config_file = relay_info["config_file"]
+            relay_process = launch(
+                relay_id,
+                [
+                    python,
+                    "-m",
+                    "src.core.run_relay",
+                    "--relay-config",
+                    relay_config_file,
+                    "--global-config",
+                    args.global_config,
+                    "--topology-config",
+                    args.topology_config,
+                    "--defaults-config",
+                    args.defaults_config,
+                    *dry_run_flag,
+                ],
+            )
+            relay_cfg = load_yaml(relay_config_file)
+            _wait_for_listener(
+                relay_process,
+                relay_cfg["relay"]["listen_address"],
+                args.startup_timeout,
+            )
+
         # 入れ子Edgeは親Edgeの待受後に起動するため、topology記載順に1台ずつ起動する
-        edges = topology_cfg.get("edges", {})
+        edges = topology_cfg.get("edges") or {}
         for edge_id, edge_info in edges.items():
             edge_config_file = edge_info.get(
                 "config_file", f"config/edge/{edge_id}.yaml"
@@ -212,17 +241,21 @@ def main() -> int:
             )
 
         assignments = topology_cfg.get("data_partition", {}).get("assignments", {})
-        for edge_id, edge_info in edges.items():
-            edge_config_file = edge_info.get(
-                "config_file", f"config/edge/{edge_id}.yaml"
+        parents = {**relays, **edges}
+        for parent_id, parent_info in parents.items():
+            config_file = parent_info.get(
+                "config_file", f"config/edge/{parent_id}.yaml"
             )
-            edge_cfg = load_yaml(edge_config_file)
-            address = edge_cfg["edge"]["sub_server_address"].replace(
-                "0.0.0.0", "127.0.0.1"
+            parent_cfg = load_yaml(config_file)
+            listen = (
+                parent_cfg["relay"]["listen_address"]
+                if parent_id in relays
+                else parent_cfg["edge"]["sub_server_address"]
             )
-            for leaf_id in edge_info.get("leaf_clients", []):
-                if leaf_id in edges:
-                    continue  # 子がEdge(中継ノード)の場合は上で起動済み
+            address = listen.replace("0.0.0.0", "127.0.0.1")
+            for leaf_id in parent_info.get("leaf_clients", []):
+                if leaf_id in parents:
+                    continue  # 子がEdge/中継ノードの場合は上で起動済み
                 launch(
                     leaf_id,
                     [

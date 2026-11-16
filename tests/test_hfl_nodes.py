@@ -36,6 +36,51 @@ def test_inventory_is_consistent(profile):
     assert inventory.no_proxy_list().startswith("localhost,127.0.0.1,192.168.10.201")
 
 
+@pytest.mark.parametrize("profile", ["config/jetson-flat", "config/jetson-flat-paced"])
+def test_flat_profile_uses_relays(profile):
+    inventory = hfl_nodes.load_inventory(profile)
+    assert hfl_nodes.check(inventory) == []
+    assert [n.role for n in inventory.nodes] == [
+        "global", "relay", "relay", "relay", "leaf", "relay", "leaf",
+    ]
+    relay = inventory.by_num(204)
+    assert relay.config == f"{profile}/leaf_01.yaml"
+    assert relay.parent_addr == "192.168.10.202:9001" and relay.port == 9003
+    assert inventory.by_num(207).parent_addr == "192.168.10.206:9004"
+    assert inventory.by_num(207).partition == 5
+    command = hfl_nodes.build_command(inventory, relay, dry_run=True)
+    assert command[:4] == ["-m", "src.core.run_relay", "--relay-config", relay.config]
+    assert "--topology-config" in command and command[-1] == "--dry-run"
+
+
+def test_check_rejects_mixed_edges_and_relays_and_bad_relay_addresses(tmp_path):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "relay.yaml").write_text(
+        "relay:\n  id: edge_01\n  listen_address: 0.0.0.0:9009\n"
+        "  parent_address: 192.168.10.201:8080\n",
+        encoding="utf-8",
+    )
+    (profile / "topology.yaml").write_text(
+        f"edges:\n  edge_02:\n    config_file: x.yaml\n    leaf_clients: []\n"
+        f"relays:\n  edge_01:\n    config_file: {(profile / 'relay.yaml').as_posix()}\n"
+        "    leaf_clients: [leaf_02]\n"
+        "data_partition:\n  assignments: {leaf_02: 2}\n",
+        encoding="utf-8",
+    )
+    (profile / "nodes.yaml").write_text(
+        "nodes:\n"
+        "  - {num: 201, role: global, port: 8080}\n"
+        "  - {num: 202, role: relay, id: edge_01, port: 9001, parent: 201}\n"
+        "  - {num: 205, role: leaf, id: leaf_02, parent: 202}\n",
+        encoding="utf-8",
+    )
+    errors = hfl_nodes.check(hfl_nodes.load_inventory(str(profile)))
+    assert any("must not define both" in e for e in errors)
+    assert any("port 9001 != listen_address 9009" in e for e in errors)
+    assert not any("leaf_02" in e for e in errors)  # relays の leaf_clients も親子として認める
+
+
 def test_commands_match_the_powershell_launcher():
     inventory = hfl_nodes.load_inventory("config/jetson-5tier-longrun")
     leaf = hfl_nodes.build_command(inventory, inventory.by_num(205), dry_run=True)

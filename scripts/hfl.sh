@@ -6,6 +6,8 @@
 #   .201 や PC から 7 台まとめて起動:   scripts/hfl.sh start-all --max-hours 240
 #
 # 台帳は config/<profile>/nodes.yaml (既定: config/jetson-5tier-longrun)。
+#   flat FL (多段集約なし・中継は TCP 転送) は --profile config/jetson-flat (連続) /
+#   config/jetson-flat-paced (10分間隔)。docs/jetson-flat-experiment.md
 # 詳細は scripts/hfl.sh help と docs/jetson-longrun-experiment.md を参照。
 # =============================================================================
 set -euo pipefail
@@ -53,7 +55,8 @@ Usage: scripts/hfl.sh <command> [NUM] [options]
   check           台帳と設定ファイルの整合性を検証
 
 Options:
-  --profile DIR     台帳・設定のディレクトリ (既定: config/jetson-5tier-longrun)
+  --profile DIR     台帳・設定のディレクトリ (既定: config/jetson-5tier-longrun。
+                    flat FL は config/jetson-flat または config/jetson-flat-paced)
   --run-id ID       実験 ID (既定: start/start-all は日時、他は logs/current_run)
   --dry-run         疎通確認モード (dummy データ・2ラウンド)
   --max-hours H     Global の時間上限 (YAML の max_duration_hours を上書き。再開後も最初の開始から数える)

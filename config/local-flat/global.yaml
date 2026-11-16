@@ -1,0 +1,37 @@
+# =============================================================================
+# 1PC flat FL 疎通試験: Global Server 設定 (dry-run で 2 ラウンド)
+#   uv run python run.py --dry-run --global-config config/local-flat/global.yaml \
+#       --topology-config config/local-flat/topology.yaml
+# =============================================================================
+
+server:
+  address: "0.0.0.0:8080"
+  num_rounds: 5
+  round_timeout: 300.0
+  checkpoint_every: 1
+  min_fit_clients: 6
+  min_available_clients: 6
+  fraction_fit: 1.0
+
+strategy:
+  name: "fedavg"
+  params: {}
+
+model:
+  name: "simplecnn"
+  num_classes: 10
+
+dataset:
+  name: "cifar10"
+  test_batch_size: 128
+
+evaluation:
+  enabled: true
+  log_dir: "./runs"
+
+mode: "production"
+dry_run:
+  global_rounds: 2
+  sub_rounds: 1
+  dummy_data_size: 64
+  dummy_steps: 2

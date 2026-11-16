@@ -51,6 +51,30 @@ def test_describe_global_edge_and_clients():
     assert d("leaf", {})["phase"] == "stopped"
 
 
+def test_describe_relay_uses_internal_client_for_training_phase():
+    d = hfl_activity.describe
+    assert d("relay", {})["phase"] == "stopped"
+    starting = d("relay", {"relay": _ev(1, "relay", "start")})
+    assert starting["phase"] == "starting" and starting["internal"]["phase"] == "stopped"
+
+    forwarding = d("relay", {
+        "relay": _ev(2, "relay", "relay_connect", connections=2),
+        "internal_client": _ev(3, "internal_client", "fit_end", global_round=4),
+    })
+    assert forwarding["phase"] == "idle" and "子 2 接続" in forwarding["label"]
+    assert forwarding["internal"]["phase"] == "idle"
+
+    training = d("relay", {
+        "relay": _ev(2, "relay", "relay_connect", connections=2),
+        "internal_client": _ev(5, "internal_client", "fit_start", global_round=5),
+    })
+    assert training["phase"] == "train" and "ラウンド 5" in training["label"]
+
+    only_forwarding = d("relay", {"relay": _ev(2, "relay", "relay_disconnect", connections=0)})
+    assert only_forwarding["phase"] == "idle" and only_forwarding["label"].startswith("転送のみ")
+    assert d("relay", {"relay": _ev(9, "relay", "stop", reason="finished")})["phase"] == "stopped"
+
+
 def test_round_timeline_keeps_latest_complete_round_and_corrects_clocks():
     timeline = hfl_activity.RoundTimeline(keep_rounds=2)
     for rnd, base in ((1, 100.0), (2, 200.0), (3, 300.0)):

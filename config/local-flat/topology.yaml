@@ -1,0 +1,60 @@
+# =============================================================================
+# flat FL (多段集約なし) を 5 段 HFL と同じ物理トポロジーで動かす
+#
+#                 Global (集約はここだけ)
+#            ┌──────┴──────┐
+#         Edge 01        Edge 02        ← 中継 (TCP 転送) + Internal Client
+#      ┌─────┼─────┐        │
+#     L01   L02  Internal Internal
+#   ┌──┴──┐
+#  L03  Internal                        ← 中継 (TCP 転送) + Internal Client
+#  ┌┴──┐
+# L04 Internal
+#
+# relays の各ノードは src.core.run_relay で起動し、子の Flower 接続を親へそのまま中継する
+# (集約しない)。leaf_clients は直下の子ノード (Internal Client 以外)。
+# relays は親から子の順に記載する (run.py はこの順で起動する)。
+# 1 ラウンド片方向のモデル転送数: HFL は全 6 リンクで 1 (合計 6)、flat は
+# Edge01-Global 5 / Edge02-Global 1 / L01-Edge01 3 / L02-Edge01 1 / L03-L01 2 / L04-L03 1 (合計 13)。
+# =============================================================================
+
+mode: "flat"
+
+relays:
+  edge_01:
+    config_file: "config/local-flat/edge_01.yaml"
+    leaf_clients:
+      - leaf_01
+      - leaf_02
+
+  edge_02:
+    config_file: "config/local-flat/edge_02.yaml"
+    leaf_clients: []
+
+  leaf_01:
+    config_file: "config/local-flat/leaf_01.yaml"
+    leaf_clients:
+      - leaf_03
+
+  leaf_03:
+    config_file: "config/local-flat/leaf_03.yaml"
+    leaf_clients:
+      - leaf_04
+
+data_partition:
+  method: "dirichlet"
+  params:
+    alpha: 0.5
+    min_partition_size: 10
+    seed: 42
+
+  # HFL と同じ 6 クライアント・同じ partition (中継ノードも Internal Client で学習する)
+  assignments:
+    edge_01_internal: 0
+    leaf_01_internal: 1
+    leaf_02: 2
+    edge_02_internal: 3
+    leaf_03_internal: 4
+    leaf_04: 5
+
+  total_partitions: 6

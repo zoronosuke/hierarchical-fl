@@ -56,7 +56,7 @@
 <body>
 <main>
   <div class="head">
-    <h1>階層型連合学習（5段・Jetson 7台）</h1>
+    <h1 id="title">階層型連合学習（5段・Jetson 7台）</h1>
     <span class="clock" id="clock"></span>
   </div>
   <div class="controls">
@@ -90,6 +90,7 @@
   const params = new URLSearchParams(location.search);
   if (params.get('clean') === '1') document.body.classList.add('clean');
   const seconds = parseFloat(params.get('seconds') || D.seconds || 15);
+  if (D.title) { $('title').textContent = D.title; document.title = D.title; }
   const frames = D.frames, nSteps = frames.length ? frames[0].steps.length : 1;
   const xMin = D.range.t_from, xMax = D.range.t_to;
   const gap = Math.max(300, 2 * (D.round_interval_s || 0));

@@ -1,0 +1,41 @@
+# =============================================================================
+# Jetson Orin Nano 7台 flat FL (連続実行): Global Server 設定
+#
+# 集約は Global だけ。6 クライアント (中継 4 台の Internal Client + Leaf 2 台) が Flower で
+# 直接つながる (物理的には中継ノードを TCP 転送で経由する)。
+# round_interval_s が無いので待たずに連続でラウンドを回す。10 分間隔にしたいときは
+# config/jetson-flat-paced を使う。max_duration_hours (または --max-hours) で正常停止する。
+# =============================================================================
+
+server:
+  address: "0.0.0.0:8080"
+  num_rounds: 1000000
+  max_duration_hours: 48        # --max-hours で上書き可
+  round_timeout: 1500.0         # 6 クライアントの fit 完了を最大25分待つ
+  checkpoint_every: 1           # 毎ラウンド保存 (0.75 MB)
+  min_fit_clients: 6
+  min_available_clients: 6
+  fraction_fit: 1.0
+
+strategy:
+  name: "fedavg"
+  params: {}
+
+model:
+  name: "simplecnn"
+  num_classes: 10
+
+dataset:
+  name: "cifar10"
+  test_batch_size: 128
+
+evaluation:
+  enabled: true
+  log_dir: "./runs"
+
+mode: "production"
+dry_run:
+  global_rounds: 2
+  sub_rounds: 1
+  dummy_data_size: 64
+  dummy_steps: 2

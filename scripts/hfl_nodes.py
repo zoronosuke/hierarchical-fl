@@ -12,8 +12,10 @@ Usage (リポジトリルートで実行):
     python scripts/hfl_nodes.py --profile DIR json           # 台帳全体を JSON で出力
 
 台帳に書くのは num / role / id / port / parent だけで、Edge の設定ファイルは
-topology.yaml の edges[id].config_file、Leaf の partition は
-data_partition.assignments[id]、親アドレスは親ノードの ip:port から導く。
+topology.yaml の edges[id].config_file (flat FL の中継は relays[id].config_file)、
+Leaf の partition は data_partition.assignments[id]、親アドレスは親ノードの ip:port から導く。
+
+role: global / edge (HFL: sub-server で集約) / relay (flat FL: TCP 転送のみ) / leaf
 """
 
 from __future__ import annotations
@@ -30,7 +32,17 @@ from typing import Any
 
 import yaml
 
-ROLES = ("global", "edge", "leaf")
+ROLES = ("global", "edge", "relay", "leaf")
+# 子サーバーを持つ (= 配下の leaf_clients を持つ) role と、topology.yaml でのキー
+CHILDREN_KEYS = {"edge": "edges", "relay": "relays"}
+
+
+def children_map(topology: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """edges と relays を合わせた {id: {config_file, leaf_clients}}。"""
+    merged: dict[str, dict[str, Any]] = {}
+    for key in CHILDREN_KEYS.values():
+        merged.update(topology.get(key) or {})
+    return merged
 
 
 @dataclass
@@ -79,7 +91,8 @@ def load_inventory(profile: str) -> Inventory:
     profile_dir = Path(profile)
     raw = _load_yaml(profile_dir / "nodes.yaml")
     topology = _load_yaml(profile_dir / "topology.yaml")
-    edges = topology.get("edges", {})
+    edges = topology.get("edges") or {}
+    relays = topology.get("relays") or {}
     assignments = topology.get("data_partition", {}).get("assignments", {})
 
     inventory = Inventory(
@@ -110,6 +123,8 @@ def load_inventory(profile: str) -> Inventory:
         )
         if role == "edge":
             node.config = edges.get(node_id, {}).get("config_file")
+        elif role == "relay":
+            node.config = relays.get(node_id, {}).get("config_file")
         elif role == "leaf":
             partition = assignments.get(node_id)
             node.partition = int(partition) if partition is not None else None
@@ -149,6 +164,10 @@ def build_command(
         if not node.config:
             raise ValueError(f"edge {node.id}: config_file not found in topology.yaml")
         args = ["-m", "src.core.run_edge", "--edge-config", node.config] + common
+    elif node.role == "relay":
+        if not node.config:
+            raise ValueError(f"relay {node.id}: config_file not found in topology.yaml relays")
+        args = ["-m", "src.core.run_relay", "--relay-config", node.config] + common
     elif node.role == "leaf":
         if node.partition is None or node.parent_addr is None:
             raise ValueError(f"leaf {node.id}: partition or parent address missing")
@@ -169,7 +188,11 @@ def check(inventory: Inventory) -> list[str]:
     """台帳・topology・各 Edge 設定の整合性を検証し、問題点を返す。"""
     errors: list[str] = []
     topology = _load_yaml(Path(inventory.topology_config))
-    edges = topology.get("edges", {})
+    edges = topology.get("edges") or {}
+    relays = topology.get("relays") or {}
+    children = children_map(topology)
+    if edges and relays:
+        errors.append("topology.yaml must not define both edges (HFL) and relays (flat FL)")
     seen: set[int] = set()
     globals_ = [node for node in inventory.nodes if node.role == "global"]
     if len(globals_) != 1:
@@ -187,7 +210,7 @@ def check(inventory: Inventory) -> list[str]:
                 errors.append(f"{prefix}: parent {node.parent_num} must be listed before it")
             if node.parent_addr is None:
                 errors.append(f"{prefix}: parent {node.parent_num} has no port")
-        if node.role in ("global", "edge") and node.port is None:
+        if node.role in ("global", "edge", "relay") and node.port is None:
             errors.append(f"{prefix}: port is required")
         if node.role == "edge":
             if node.id not in edges:
@@ -208,9 +231,32 @@ def check(inventory: Inventory) -> list[str]:
                             f"{prefix}: global_server_address "
                             f"{ec.get('global_server_address')} != parent {node.parent_addr}"
                         )
+        if node.role == "relay":
+            if node.id not in relays:
+                errors.append(f"{prefix}: not in topology relays")
+            elif not node.config:
+                errors.append(f"{prefix}: relays[{node.id}].config_file is missing")
+            else:
+                try:
+                    rc = _load_yaml(Path(node.config))["relay"]
+                except (OSError, KeyError) as exc:
+                    errors.append(f"{prefix}: cannot read {node.config}: {exc}")
+                else:
+                    listen_port = str(rc.get("listen_address", "")).rsplit(":", 1)[-1]
+                    if str(node.port) != listen_port:
+                        errors.append(
+                            f"{prefix}: port {node.port} != listen_address {listen_port}"
+                        )
+                    if rc.get("parent_address") != node.parent_addr:
+                        errors.append(
+                            f"{prefix}: parent_address {rc.get('parent_address')} "
+                            f"!= parent {node.parent_addr}"
+                        )
+                    if rc.get("id") != node.id:
+                        errors.append(f"{prefix}: relay.id {rc.get('id')} != {node.id}")
         if node.role == "leaf":
             parent = inventory.by_num(node.parent_num) if node.parent_num else None
-            if parent is None or node.id not in edges.get(parent.id, {}).get("leaf_clients", []):
+            if parent is None or node.id not in children.get(parent.id, {}).get("leaf_clients", []):
                 errors.append(f"{prefix}: not listed in parent's leaf_clients")
             if node.partition is None:
                 errors.append(f"{prefix}: no data_partition.assignments entry")

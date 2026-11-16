@@ -13,6 +13,9 @@ JSONL イベント記録。
 spawn された子プロセスは環境変数を継承するので、各プロセスで get_event_logger() を
 呼ぶだけで同じファイルに追記できる。Edge では3プロセスが同じファイルに書くため、
 行が混ざらないよう書き込み中はファイルロックを取る (Linux: flock, Windows: msvcrt)。
+同じプロセスの複数スレッド・複数 EventLogger (flat FL の中継: 転送スレッドと Internal Client)
+はプロセス内のロックで直列にする (Windows の msvcrt.locking は同一プロセスの別ハンドルが
+ロック中だと待たずに EDEADLOCK で失敗するため)。
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 import traceback
 from contextlib import contextmanager
@@ -30,6 +34,8 @@ from typing import Any, Iterator
 from src.utils.logger import get_logger
 
 logger = get_logger("events")
+
+_PROCESS_LOCK = threading.Lock()  # プロセス内の全 EventLogger で共有
 
 if sys.platform == "win32":
     import msvcrt
@@ -116,7 +122,7 @@ class EventLogger:
         record.update(fields)
         line = json.dumps(record, ensure_ascii=False, default=_json_default) + "\n"
         try:
-            with _locked(self._fd):
+            with _PROCESS_LOCK, _locked(self._fd):
                 os.write(self._fd, line.encode("utf-8"))  # O_APPEND なので常に末尾に書く
                 os.fsync(self._fd)
         except OSError as exc:

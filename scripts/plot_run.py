@@ -45,6 +45,15 @@ from typing import Any
 SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
 INK, INK2, MUTED, GRID, SURFACE = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#fcfcfb"
 SEQ_LIGHT, SEQ_DARK = "#cde2fb", "#0d366b"
+# matplotlib の体裁 (compare_runs.py と共用)
+RCPARAMS = {
+    "font.family": "sans-serif", "font.size": 10, "text.color": INK,
+    "axes.labelcolor": INK2, "axes.edgecolor": GRID, "axes.facecolor": SURFACE,
+    "figure.facecolor": SURFACE, "xtick.color": MUTED, "ytick.color": MUTED,
+    "grid.color": GRID, "grid.linewidth": 0.8, "axes.grid": True,
+    "axes.spines.top": False, "axes.spines.right": False,
+    "legend.frameon": False, "lines.linewidth": 2,
+}
 
 LEADING_COLUMNS = [
     "ts", "t", "t_corrected", "run_id", "node", "node_num", "host", "proc", "pid", "event",
@@ -464,14 +473,7 @@ def make_plots(
         print("matplotlib がありません: uv sync --extra analysis を実行", file=sys.stderr)
         return []
 
-    plt.rcParams.update({
-        "font.family": "sans-serif", "font.size": 10, "text.color": INK,
-        "axes.labelcolor": INK2, "axes.edgecolor": GRID, "axes.facecolor": SURFACE,
-        "figure.facecolor": SURFACE, "xtick.color": MUTED, "ytick.color": MUTED,
-        "grid.color": GRID, "grid.linewidth": 0.8, "axes.grid": True,
-        "axes.spines.top": False, "axes.spines.right": False,
-        "legend.frameon": False, "lines.linewidth": 2,
-    })
+    plt.rcParams.update(RCPARAMS)
     written: list[Path] = []
     nodes = sorted({node_key(e) for e in events}, key=lambda k: str(k[0]))
     color_of = {n: SERIES[i % len(SERIES)] for i, n in enumerate(nodes)}

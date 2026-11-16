@@ -172,7 +172,7 @@
   }
 
   // ---- 直近ラウンドのタイムライン (横棒) ----
-  const PROC_COLOR = { global: '--s7', edge: '--s2', internal_client: '--s3', leaf: '--s1' };
+  const PROC_COLOR = { global: '--s7', edge: '--s2', relay: '--s2', internal_client: '--s3', leaf: '--s1' };
   function drawTimeline(canvas, timeline) {
     const dpr = window.devicePixelRatio || 1;
     const bars = (timeline && timeline.bars) || [];

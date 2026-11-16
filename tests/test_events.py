@@ -67,3 +67,32 @@ def test_second_logger_appends_to_existing_file(tmp_path):
     second.close()
     procs = [json.loads(line)["proc"] for line in path.read_text().splitlines()]
     assert procs == ["a", "b"]
+
+
+def test_concurrent_threads_and_loggers_do_not_lose_events(tmp_path):
+    """同じプロセスの複数スレッド・複数 EventLogger が同じファイルに書いても 1 行も落とさない。
+
+    flat FL の中継 (転送スレッドが relay、メインスレッドが internal_client) の形。
+    Windows の msvcrt.locking は同一プロセスの別ハンドルがロック中だと EDEADLOCK で即失敗するので、
+    プロセス内のロックで直列にしていないと行が欠ける。
+    """
+    import threading
+
+    path = tmp_path / "events-202.jsonl"
+    loggers = [EventLogger(str(path), proc=f"p{i}") for i in range(3)]
+
+    def write(logger: EventLogger, n: int) -> None:
+        for i in range(n):
+            logger.emit("tick", i=i)
+
+    threads = [threading.Thread(target=write, args=(lg, 150)) for lg in loggers for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    for lg in loggers:
+        lg.close()
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3 * 2 * 150
+    records = [json.loads(line) for line in lines]  # 行が混ざっていれば JSON として壊れる
+    assert all(r["event"] == "tick" for r in records)

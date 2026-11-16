@@ -10,6 +10,8 @@
                      eval / stop / error
     internal_client: start / fit_start / fit_end / stop / error
     leaf:            start / fit_start / fit_end / stop / error
+    relay:           start / relay_connect / relay_disconnect / relay_connect_failed / stop / error
+                     (flat FL の中継。集約せず子の接続を親へ TCP 転送する。学習は internal_client)
 """
 
 from __future__ import annotations
@@ -118,12 +120,37 @@ def describe_client(event: dict[str, Any] | None) -> dict[str, str]:
     return {"label": str(kind), "phase": PHASE_IDLE}
 
 
+def describe_relay(
+    relay: dict[str, Any] | None, internal: dict[str, Any] | None
+) -> dict[str, str]:
+    """flat FL の中継ノード: 転送中の接続数を出し、学習の段階は Internal Client で判定する。"""
+    if relay is None:
+        return {"label": "未起動", "phase": PHASE_STOPPED}
+    done = _finished(relay)
+    if done:
+        return done
+    kind = relay.get("event")
+    if kind == "start":
+        return {"label": "起動・親の待受待ち", "phase": PHASE_STARTING}
+    connections = relay.get("connections")
+    suffix = f" (子 {connections} 接続を転送中)" if isinstance(connections, int) else ""
+    client = describe_client(internal) if internal is not None else None
+    if client is not None and client["phase"] in (PHASE_TRAIN, PHASE_ERROR):
+        return {"label": client["label"] + suffix, "phase": client["phase"]}
+    base = "待機" if client is not None else "転送のみ"
+    return {"label": base + suffix, "phase": PHASE_IDLE}
+
+
 def describe(role: str, proc_events: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """ノード全体の活動 (+ Edge なら Internal Client の活動)。"""
+    """ノード全体の活動 (+ Edge / 中継なら Internal Client の活動)。"""
     if role == "global":
         return describe_global(proc_events.get("global"))
     if role == "edge":
         result = describe_edge(proc_events.get("edge"), proc_events.get("sub_server"))
+        result["internal"] = describe_client(proc_events.get("internal_client"))
+        return result
+    if role == "relay":
+        result = describe_relay(proc_events.get("relay"), proc_events.get("internal_client"))
         result["internal"] = describe_client(proc_events.get("internal_client"))
         return result
     return describe_client(proc_events.get("leaf"))

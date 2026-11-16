@@ -62,6 +62,20 @@ def choose_range(evals: list[dict[str, Any]]) -> tuple[int, int]:
     return 0, end
 
 
+def replay_title(inventory) -> str:
+    """ページの見出し。中継 (relay) が居れば flat FL、そうでなければ段数を数えて HFL。"""
+    nodes = {n.num: n for n in inventory.nodes}
+    if any(n.role == "relay" for n in inventory.nodes):
+        return f"通常の連合学習（TCP 中継・Jetson {len(nodes)}台）"
+
+    def depth(num: int) -> int:
+        node = nodes[num]
+        return 1 if node.parent_num is None else 1 + depth(node.parent_num)
+
+    tiers = max(depth(num) for num in nodes) if nodes else 0
+    return f"階層型連合学習（{tiers}段・Jetson {len(nodes)}台）"
+
+
 def _downsample(points: list[list[Any]], limit: int = MAX_SERIES_POINTS) -> list[list[Any]]:
     if len(points) <= limit:
         return points
@@ -171,6 +185,7 @@ def build(root: Path, profile: str, from_round: int | None, to_round: int | None
             ])
     return {
         "run_id": evals[0].get("run_id"),
+        "title": replay_title(inventory),
         "seconds": seconds,
         "round_interval_s": round_interval_s(events),
         "range": {

@@ -1,0 +1,15 @@
+# =============================================================================
+# 1PC flat FL 疎通試験: leaf_01 設定 (中継 = TCP 転送 + Internal Client、集約しない)
+# listen_address の子の接続を parent_address へそのまま中継する。
+# =============================================================================
+
+relay:
+  id: "leaf_01"
+  listen_address: "0.0.0.0:9003"
+  parent_address: "127.0.0.1:9001"       # 直上 (Global または上位中継)
+
+  startup_timeout: 60.0          # 親の待受を待つ上限 (秒)
+  shutdown_timeout: 30.0        # 親との接続が終わった後、中継中の接続が閉じるのを待つ上限 (秒)
+
+  internal_client:
+    enabled: true

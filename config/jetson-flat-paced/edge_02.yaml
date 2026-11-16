@@ -1,0 +1,15 @@
+# =============================================================================
+# Jetson 7台 flat FL (10分間隔): edge_02 設定 (中継 = TCP 転送 + Internal Client、集約しない)
+# listen_address の子の接続を parent_address へそのまま中継する。
+# =============================================================================
+
+relay:
+  id: "edge_02"
+  listen_address: "0.0.0.0:9002"
+  parent_address: "192.168.10.201:8080"       # 直上 (Global または上位中継)
+
+  startup_timeout: 600.0          # 親の待受を待つ上限 (秒)
+  shutdown_timeout: 120.0        # 親との接続が終わった後、中継中の接続が閉じるのを待つ上限 (秒)
+
+  internal_client:
+    enabled: true

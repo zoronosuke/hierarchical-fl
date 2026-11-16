@@ -31,6 +31,7 @@ scripts/hfl.sh start|stop|status [NUM]     # Jetson 上で自ノードの役割�
 scripts/hfl.sh start-all|stop-all|status-all|resume|collect|monitor start   # .201 や PC から7台一括
 uv run python scripts/plot_run.py collected/<run-id>   # 回収した events.jsonl を CSV + PNG に
 uv run python scripts/build_replay.py logs/<run-id>/monitor   # 動画用の再生ページ (replay.html)
+uv run python scripts/compare_runs.py collected/<hfl-run> collected/<flat-run>   # HFL と flat FL の通信量・精度比較
 ```
 
 ## Architecture (IMPORTANT)
@@ -47,6 +48,8 @@ uv run python scripts/build_replay.py logs/<run-id>/monitor   # 動画用の再�
 - エントリーポイントは `run_main` (src/utils/process.py) で包む。Flower は例外時に gRPC スレッドが残りプロセスが終了しないため
 - 各プロセスは `HFL_EVENT_LOG` が設定されていれば JSONL イベント (src/utils/events.py) を追記する。未設定なら no-op
 - 長時間実験の運用は docs/jetson-longrun-experiment.md と scripts/hfl.sh (台帳: config/<profile>/nodes.yaml)
+- flat FL (多段集約なしの比較用): 台帳 role `relay` のノードは `src.core.run_relay` で起動し、子の Flower 接続を親へ TCP 転送するだけ (`src/core/tcp_relay.py`、集約しない)。自身は Internal Client として親へ直接接続。topology.yaml は `edges:` の代わりに `relays:`。profile は `config/jetson-flat` (連続) / `config/jetson-flat-paced` (10分間隔)、1PC は `config/local-flat`。docs/jetson-flat-experiment.md
+- `scripts/compare_runs.py` で 2 run (HFL と flat) のリンクごと通信量 (子の `links.parent` / ラウンド数) と精度を比較する
 
 ## Conventions
 - 設定はすべて YAML (config/ 配下)。ハードコーディング禁止

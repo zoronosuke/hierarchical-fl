@@ -167,6 +167,60 @@ def test_persistent_hfl_5tier_two_global_rounds():
         ) in log
 
 
+def test_flat_relay_two_global_rounds(tmp_path):
+    """flat FL: 中継 4 台が TCP 転送だけを行い、Global が 6 クライアントを直接集約する。"""
+    repository = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [
+            sys.executable, "run.py", "--dry-run",
+            "--global-config", "config/local-flat/global.yaml",
+            "--topology-config", "config/local-flat/topology.yaml",
+            "--run-id", "flat", "--log-dir", str(tmp_path),
+            "--completion-timeout", "150",
+        ],
+        cwd=repository, capture_output=True, text=True, timeout=200, check=False,
+    )
+    log = completed.stdout + completed.stderr
+    assert completed.returncode == 0, log
+    assert "Traceback" not in log
+    assert "All processes completed successfully" in log
+    assert "Persistent sub-server starting on" not in log  # 集約は Global だけ
+    assert log.count("TCP relay listening on") == 4
+
+    for client_id in (
+        "edge_01_internal", "leaf_01_internal", "leaf_02",
+        "edge_02_internal", "leaf_03_internal", "leaf_04",
+    ):
+        assert log.count(f"[{client_id}] fit complete:") == 2
+
+    run_dir = tmp_path / "flat"
+    aggregates = [
+        e for e in _events(run_dir / "events-global.jsonl") if e["event"] == "aggregate"
+    ]
+    assert [a["results"] for a in aggregates] == [6, 6]
+    assert len(aggregates[0]["participants"]) == 6
+
+    # edge_01 が中継する接続: leaf_02、leaf_01 の Internal、
+    # leaf_01 が転送してきた 2 本 (leaf_03 の Internal と leaf_04)
+    for relay_id, forwarded in (("edge_01", 4), ("edge_02", 0), ("leaf_01", 2), ("leaf_03", 1)):
+        events = _events(run_dir / f"events-{relay_id}.jsonl")
+        stops = [(e["proc"], e["reason"]) for e in events if e["event"] == "stop"]
+        assert ("relay", "finished") in stops and ("internal_client", "finished") in stops
+        assert not [e for e in events if e["event"] == "error"]
+        # 子の wait_for_port の疎通確認も 0 バイトの接続として記録されるので、
+        # 上りにバイトが流れた接続 (= Flower の接続) だけを数える
+        disconnects = [
+            e for e in events if e["event"] == "relay_disconnect" and e["bytes_up"] > 0
+        ]
+        assert len(disconnects) == forwarded, (relay_id, disconnects)
+        for d in disconnects:
+            assert d["bytes_down"] > 0
+        assert not [e for e in events if e["event"] == "relay_connect_failed"]
+    for leaf in ("leaf_02", "leaf_04"):
+        stops = [e for e in _events(run_dir / f"events-{leaf}.jsonl") if e["event"] == "stop"]
+        assert stops and stops[-1]["reason"] == "finished"
+
+
 def _events(path: Path) -> list[dict]:
     if not path.exists():
         return []

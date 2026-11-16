@@ -56,6 +56,16 @@ uv run python -m src.core.run_edge --edge-config config/edge/edge_01.yaml
 uv run python -m src.core.run_leaf --client-id leaf_01 --edge-address 127.0.0.1:9001 --partition-id 1
 ```
 
+## flat FL（多段集約なし）との比較
+
+同じ 7 台・同じ親子リンクで、集約を Global だけで行う通常の連合学習も動かせる。中継ノードは子の Flower 接続を親へ TCP 転送するだけ（`src/core/run_relay.py`）。手順と比較方法は [`docs/jetson-flat-experiment.md`](docs/jetson-flat-experiment.md)。
+
+```bash
+uv run python run.py --dry-run --global-config config/local-flat/global.yaml --topology-config config/local-flat/topology.yaml
+scripts/hfl.sh start-all --profile config/jetson-flat --run-id flat-YYYYMMDD-01          # Jetson 7台 (連続実行)
+uv run python scripts/compare_runs.py collected/<hfl-run> collected/<flat-run>           # 通信量・精度の比較
+```
+
 ## 開発
 
 ```bash
