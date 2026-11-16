@@ -15,6 +15,8 @@ remote_dir: "~/hierarchical-fl-persistent"
 monitor_port: 8000
 defaults_config: "config/defaults.yaml"
 
+sampler_interval_s: 5          # Jetson 側の記録 (電力・温度・メモリ・通信量) の間隔。flat FL との通信量比較に使う
+
 nodes:
   - {num: 201, role: global, port: 8080}
   - {num: 202, role: edge, id: edge_01, port: 9001, parent: 201}

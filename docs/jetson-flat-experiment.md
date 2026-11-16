@@ -51,7 +51,7 @@ HFL では 1 モデル = 0.755 MB の実測から、flat FL は全リンク合�
 
 | プロファイル | ラウンド間隔 | 用途 |
 |---|---|---|
-| `config/jetson-flat/` | **なし（連続実行）**。長さは `--max-hours` で決める (既定 48 時間) | 既定。HFL の `jetson-5tier-longrun` に相当 |
+| `config/jetson-flat/` | **なし（連続実行）**。長さは `--max-hours` で決める (既定 48 時間) | 既定。HFL 側の対になる連続実行プロファイルは `jetson-5tier-longrun` (通信量の記録 `sampler_interval_s` を持つ) |
 | `config/jetson-flat-paced/` | 600 秒・時計合わせ (HFL の `jetson-5tier-paced` と同じ) | 時間軸でも HFL の paced 実験と比べたいとき |
 | `config/local-flat/` | なし | 1PC での疎通確認 (`run.py`) |
 
